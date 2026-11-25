@@ -190,7 +190,11 @@ function rollHits(state: GameState, ownRegion: RegionId, enemyRegion: RegionId, 
     // hit": while following (followOptions.hitsBeforeReroll), that miss is a hit before the re-roll, not re-rolled.
     const early = followOptions.hitsBeforeReroll ? Math.min(guaranteed, failed) : 0;
     h += early; failed -= early;
-    const rerollDice = allowReroll ? Math.min(lead, failed) : 0;
+    // While following another rules engine's game (followOptions.declinedReroll): a side that declined its Leader
+    // re-roll (the official rules ask it, rulebook p. 30 "can") rolls none, once.
+    const declined = !!followOptions.declinedReroll?.[side];
+    if (declined) followOptions.declinedReroll![side] = false;
+    const rerollDice = allowReroll && !declined ? Math.min(lead, failed) : 0;
     let rh = 0;
     for (let i = 0; i < rerollDice; i++) { const d = rng.rollDie(6); roll?.rerolls.push(d); if (d === 6 || (d !== 1 && d >= rerollTarget)) { h++; rh++; failed--; } }
     if (roll) roll.rerollHits = rh;

@@ -484,6 +484,8 @@ function pendingOf(s) {
 // - sarumanRecruitIn, playAsPlayed, revealStrongholds: set for one step only (the Voice of Saruman's Settlements, a
 //   card played as the referee played it, the reveal path's Strongholds as the referee's option counts them).
 let followHidden = false;
+// A Leader re-roll the referee's game declined, per side, until his engine's next Combat roll of that side takes it.
+const declinedReroll = { fp: false, shadow: false };
 /** His engine's switches for following the referee's game (above): on while applying a step or listing its actions. */
 function following(on) {
   E.followOptions.askEveryCombatCard = on && followHidden;
@@ -498,6 +500,7 @@ function following(on) {
   E.followOptions.selfHitsAll = on;
   E.followOptions.dreadfulFrom = on;
   E.followOptions.hitsBeforeReroll = on;
+  E.followOptions.declinedReroll = on ? declinedReroll : null;
   E.followOptions.fpCasualtyOffset = on ? casualtyOffset : null;
   E.followOptions.reduceAlways = on;
   E.followOptions.noEffectChoices = on;
@@ -840,9 +843,11 @@ export function collapse(steps, here, state, next) {
   if (f.forced && !corresponds(here, { side: f.side, kind: f.kind, context: f.ctx, options: [o] }, f.inCard)) return { absorb: 1, note: `settled by this engine itself: ${f.kind}` };
   switch (f.kind) {
     // The official rules' Leader re-roll ("both players can re-roll"): this engine always re-rolls, without a question;
-    // the referee's dice that follow are the re-roll's. A side that declines rolls none: this engine cannot follow it.
+    // the referee's dice that follow are the re-roll's. A side that declines rolls none: its next Combat roll here
+    // rolls none either (followOptions.declinedReroll; wotr #1431, a scenario's re-roll declined for the bot).
     case 'LEADER_REROLL':
-      return o.answer === 'reroll' ? { absorb: 1 } : { fail: `${f.side} declined its Leader re-roll (this engine always re-rolls)` };
+      if (o.answer !== 'reroll') declinedReroll[side] = true;
+      return { absorb: 1 };
     case 'HUNT_ALLOCATION': {
       // This engine allocates by itself when only one number is allowed.
       const max = Math.max(0, ...here.legal.filter((a) => a.kind === 'allocateHunt').map((a) => a.dice));
@@ -1249,7 +1254,8 @@ function collapseCard(steps, here, state, next) {
   }
   // Worn with Sorrow and Toil's discard: a random Character card of the hand, a tabled one, or none. This engine asks
   // it once the Hunt has resolved, often later than the referee: kept until it is asked.
-  if (o.card === 'sh-char-15') {
+  // (Not its Combat card's Words of Power, whose options name a Companion: wotr #1431.)
+  if (o.card === 'sh-char-15' && !o.character) {
     const a = skip ? act('wornDiscard', { decline: true }) : o.answer === 'hand' ? act('wornDiscard') : act('wornDiscard', { card: N.card(o.target_card ?? o.answer) });
     if (here.kind === 'wornDiscard') return one(a);
     return { absorb: 1, defer: { side: f.side, action: a }, note: "Worn with Sorrow and Toil's discard, for when this engine asks it" };
@@ -1366,7 +1372,11 @@ function cardChoices(steps, here, next, state = null) {
   if (k === steps.length && after && after.side === last.side && after.kind === 'ARMY_SELECTION') return { more: true };
   // (Several answers naming exactly the referee's: they differ in what the referee does not name, the first is made
   // now, so that this engine is up to date when the next move is asked.)
-  if ((least > 0 || (best.length > 1 && after?.kind === 'CARD_CHOICE')) && k === steps.length && after && after.side === last.side &&
+  // (Not when the next is this bot's own question and only one answer fits: no referee answer is coming to narrow it,
+  // and this engine must be at that question when the AI is asked; Dead Men of Dunharrow's count after a destination
+  // the referee chose for it in a scenario, wotr #1431.)
+  const ownNext = after === next && next?.opt == null && best.length === 1;
+  if (!ownNext && (least > 0 || (best.length > 1 && after?.kind === 'CARD_CHOICE')) && k === steps.length && after && after.side === last.side &&
     (after.kind === 'ARMY_MOVE' || after.kind === 'CHOOSE_ATTACK' || (after.kind === 'CARD_CHOICE' && (after.card ?? after.opt?.card ?? null) === card))) return { more: true };
   // The figures that go along (ARMY_SELECTION after the move's answer, Rage of the Dunlendings' units): this engine's
   // `move` selection of the target.
@@ -1806,7 +1816,7 @@ export function defaultAnswer(d) {
     case 'ADVANCE': return find('advance') ?? ops[0];
     case 'JOIN_GROUP': return find('join') ?? ops[0];
     case 'CARD_CHOICE': {
-      if (d.context?.card === 'sh-char-15') return ops.find((o) => o.answer === 'hand') ?? ops[0]; // Worn with Sorrow and Toil
+      if (d.context?.card === 'sh-char-15' && !ops.some((o) => o.character)) return ops.find((o) => o.answer === 'hand') ?? ops[0]; // Worn with Sorrow and Toil
       return ops.find((o) => o.answer === 'skip' || o.skip === true) ?? ops.find((o) => o.answer === '0') ?? ops[0];
     }
   }
@@ -2564,7 +2574,8 @@ export class Game {
     }
     // A hand-limit discard the referee asks before this engine does (the Shadow's first).
     // Worn with Sorrow and Toil asked before this engine raises it (after the Hunt): the AI's answer to it now.
-    if (d.kind === 'CARD_CHOICE' && d.context?.card === 'sh-char-15' && here.kind !== 'wornDiscard') {
+    // (Not its Combat card's Words of Power, whose options name a Companion: wotr #1431.)
+    if (d.kind === 'CARD_CHOICE' && d.context?.card === 'sh-char-15' && here.kind !== 'wornDiscard' && !d.options.some((x) => x.character)) {
       const t = JSON.parse(JSON.stringify(this.state));
       t.pendingChoice = { owner: side, kind: 'wornDiscard', data: {} };
       const a = this.choose(side, [], t);
