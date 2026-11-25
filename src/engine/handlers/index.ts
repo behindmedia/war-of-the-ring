@@ -9,8 +9,8 @@ import { register, type EventTarget, type EventHandler } from './registry';
 import { recruit, settlementController, armySide, armyForceOf, unitCount, STACKING_LIMIT, captureIfEnemySettlement, freeForMovement, canMoveArmy, forceUnitCount, moveOwnLeaders, characterWithArmy, eventRecruitTarget, liftSiegeIfAbandoned, cardPathBlockReason, quietCardPath, cardMoveReach, ownNationsIn, freeRegion, forceSide, figureForce, fellowshipRegion, activateOnCompanionLand, type MoveSelection, type Force, armySelectionReason, cardAttackFighters, characterInPlay } from '../armies';
 import { applyCasualties, startBattle, queueOrApplyEventCasualties, runEventStrikes, hasAtWarUnit, sortieForce, canSortie, attackError, type CasualtyThen, type EventStrike } from '../combat';
 import { shadowBarredFromRegion } from '../persistent';
-import { extraHunt, drawHuntTileNumber, challengeOfTheKing, beginReveal, resolveHunt } from '../hunt';
-import { activateNation, advancePolitical, isAtWar, onArmyAttacked } from '../politics';
+import { extraHunt, resolveHunt, drawHuntTileNumber, challengeOfTheKing, beginReveal } from '../hunt';
+import { activateNation, advancePolitical, isAtWar, nationSubject, onArmyAttacked } from '../politics';
 import { REGIONS, levelOf, characterSide, sideOfNation, EVENT_BY_ID, characterDef, theNation, nationsArePlural, followOptions } from '../data';
 import { moveFellowship, hideFellowship, findCharacterRegion, beginSeparation, placeSeparatedGroup, separationRange, separationDestinations, removeCompanionOnMordorTrack } from '../fellowship';
 import { moveCharacter, moveCompanionGroup, characterDestinations, companionGroupDestinations, companionGroupBlockReason, CARD_COMPANION_MOVE_OPTS, type RangeOpts } from '../charMove';
@@ -81,6 +81,10 @@ function drawCard(state: GameState, side: Side, deck: 'character' | 'strategy'):
   logCardDraw(state, side, deck, !!top);
   // Over-limit is resolved by the player's discard choice (engine enforceHandLimit).
 }
+/** Is there a Free Peoples Strategy card left to draw? A card whose draw is its only
+ *  live clause needs one — an empty deck is not reshuffled (p.22), so the draw does
+ *  nothing (player report 4p541q1s710v204k). */
+const fpStrategyLeft = (state: GameState): boolean => state.cards.fp.draw.strategy.length > 0;
 /** Region-step distance (BFS), or Infinity. */
 function regionDist(from: string, to: string): number {
   if (from === to) return 0;
@@ -317,7 +321,10 @@ const logCardRecruit = (state: GameState, nation: Nation, region: string, reg: n
 function placeUnits(state: GameState, nation: Nation, region: string, regular: number, elite: number, quiet = false): number {
   const pool = state.reinforcements[nation];
   const dest = eventRecruitTarget(state, region, sideOfNation(nation));
-  if (!dest) return 0;
+  // An empty Settlement the enemy has captured has no enemy Army in it, so the seam above
+  // lets it through; the Almanac forbids it by name: "never permitted ... to recruit into a
+  // captured Shadow Settlement (e.g., see Monsters Roused)" (player report l2qbeep3olo04yjh).
+  if (!dest || !recruitable(state, sideOfNation(nation), region)) return 0;
   const reg = Math.max(0, Math.min(regular, pool.regular));
   const el = Math.max(0, Math.min(elite, pool.elite));
   if (reg + el === 0) return 0;
@@ -337,7 +344,7 @@ function placeForce(state: GameState, nation: Nation, region: string, opts: { re
   const lead = opts.leader ?? 0;
   let k = 0;
   if (lead > 0) {
-    const dest = eventRecruitTarget(state, region, sideOfNation(nation));
+    const dest = recruitable(state, sideOfNation(nation), region) ? eventRecruitTarget(state, region, sideOfNation(nation)) : null;
     k = dest ? Math.min(lead, pool.leader ?? 0) : 0;
     if (dest && k > 0) { dest.force.leaders += k; pool.leader = (pool.leader ?? 0) - k; }
   }
@@ -402,6 +409,8 @@ function recruitChoiceCard(side: Side, slots: RecruitSlot[], opts: {
   apply?: (s: GameState) => void;
   leaders?: RecruitSlot[];
   then?: (s: GameState) => void;
+  /** Can `then` still do anything? (A draw needs a card left in the deck.) */
+  thenLive?: (s: GameState) => boolean;
   canPlay?: (s: GameState) => boolean;
 } = {}): EventHandler {
   const slotOptions = (state: GameState, i: number): EventTarget[] => {
@@ -428,9 +437,10 @@ function recruitChoiceCard(side: Side, slots: RecruitSlot[], opts: {
     // unit+Leader card is playable for whichever half can still happen — the same
     // "maximum extent possible" rule the Imrahil example states (p.23). The reporter of
     // 550r3w1c6s3v3b28 had Kindred of Glorfindel stuck in hand with Rivendell besieged
-    // and the Elven reinforcements empty.
+    // and the Elven reinforcements empty. The draw only counts while the deck holds a
+    // card to draw (`thenLive`; player report 4p541q1s710v204k).
     canPlay: opts.canPlay ?? ((state) => slots.some((_, i) => slotOptions(state, i).length > 0)
-      || leaderPlaceable(state) || !!opts.then || !!opts.apply),
+      || leaderPlaceable(state) || (!!opts.then && (opts.thenLive?.(state) ?? true)) || !!opts.apply),
     apply: opts.apply,
     repeat: slots.length,
     // "Recruit …" is mandatory, to the maximum extent possible (p.23; Almanac: partial
@@ -489,10 +499,11 @@ const canEventRecruit = (state: GameState, nation: Nation, n = 1): boolean =>
 
 // --- Free Peoples: heal / Corruption -------------------------------------
 register('fp-char-09', { // Athelas
-  // Strengthened play condition: the card is nothing but a heal, so at zero Corruption
-  // it rolls three dice to remove nothing and burns a die and the card. Same reasoning
-  // as There Is Another Way (player report 0k6e6n2c6m6g153q).
-  canPlay: (state) => state.fellowship.corruption > 0,
+  // No play condition, so playable at zero Corruption (it heals nothing then). That was
+  // refused for a while (player report 0k6e6n2c6m6g153q), but the Almanac rules both
+  // sibling heals playable at 0 (Bilbo's Song, There Is Another Way), and a card that
+  // does nothing is a legal way to spend a die when you may not pass (p.20). The screen
+  // asks before playing it to no effect; the AI never does (HEAL_EVENTS).
   apply(state) {
     const guideIsStrider = state.fellowship.guide === 'strider';
     const need = guideIsStrider ? 3 : 5;
@@ -509,11 +520,8 @@ register('fp-char-09', { // Athelas
 // move triggers a Hunt, run via `finalize` so its follow-up choice survives), or
 // decline. A real player choice (RAW).
 register('fp-char-10', {
-  // Strengthened play condition: both halves must be dead before the card is refused.
-  // The heal is live whenever there is Corruption to remove; the Gollum half is live
-  // whenever he guides (revealed → hide, hidden → move). With neither, the card does
-  // literally nothing, so it is not offered (report 476n3s6q0c1i2c2w).
-  canPlay: (state) => state.fellowship.corruption > 0 || isGollumGuide(state),
+  // Almanac: "Can be played if on 0 Corruption but cannot heal to below 0." It was
+  // refused with neither half live (report 476n3s6q0c1i2c2w); the screen now asks first.
   apply: (state) => { heal(state, 1); },
   targets: (state) => {
     if (!isGollumGuide(state)) return [];
@@ -528,9 +536,8 @@ register('fp-char-10', {
   },
   finalize: (state, _side, applied) => { if (applied.some((t) => t.mode === 'move')) moveFellowship(state, true); },
 });
-// Bilbo's Song: a pure heal, so it is not offered with no Corruption to remove
-// (player report 0k6e6n2c6m6g153q).
-register('fp-char-12', { canPlay: (state) => state.fellowship.corruption > 0, apply(state) { heal(state, isGollumGuide(state) ? 2 : 1); } });
+// Bilbo's Song. Almanac: "Can be played if on 0 or 1 Corruption but can only heal to 0".
+register('fp-char-12', { apply(state) { heal(state, isGollumGuide(state) ? 2 : 1); } });
 
 // --- Free Peoples: political ---------------------------------------------
 register('fp-str-08', { // Wisdom of Elrond: activate + advance an FP Nation OF YOUR CHOICE
@@ -551,17 +558,18 @@ register('fp-str-08', { // Wisdom of Elrond: activate + advance an FP Nation OF 
 // Fixed-region FP recruit cards (place in a named region, with Leaders / draws).
 // Each "(Regular or Elite)" card prompts the player to choose the figure per unit.
 register('fp-str-14', recruitChoiceCard('fp', [{ nation: 'gondor', region: 'minas-tirith' }], { leaders: [{ nation: 'gondor', region: 'minas-tirith' }] })); // Guards of the Citadel
-register('fp-str-15', recruitChoiceCard('fp', [{ nation: 'elves', region: 'lorien' }], { then: (s) => drawCard(s, 'fp', 'strategy') })); // Celeborn's Galadhrim
+register('fp-str-15', recruitChoiceCard('fp', [{ nation: 'elves', region: 'lorien' }], { then: (s) => drawCard(s, 'fp', 'strategy'), thenLive: fpStrategyLeft })); // Celeborn's Galadhrim
 register('fp-str-17', recruitChoiceCard('fp', [{ nation: 'north', region: 'carrock' }], { leaders: [{ nation: 'north', region: 'carrock' }] })); // Grimbeorn the Old
 register('fp-str-18', recruitChoiceCard('fp', [{ nation: 'gondor', region: 'dol-amroth' }], { leaders: [{ nation: 'gondor', region: 'dol-amroth' }] })); // Imrahil of Dol Amroth
 // King Brand's Men (2 Regulars — no choice — then draw). The Almanac names THIS card
 // when it says a recruitment card "may still be played if recruitment is impossible …
 // just follow the other instructions on the card in that case (such as the card draw
 // for 'King Brand's Men')", so the draw alone is a legal reason to play it; the recruit
-// still needs Dale free of the enemy.
-register('fp-str-19', { apply: (s) => { if (recruitable(s, 'fp', 'dale')) placeForce(s, 'north', 'dale', { regular: 2 }); drawCard(s, 'fp', 'strategy'); } });
+// still needs Dale free of the enemy. With Dale lost (or no North Regular left) and the
+// Strategy deck empty, though, nothing at all would happen (report 4p541q1s710v204k).
+register('fp-str-19', { canPlay: (s) => (recruitable(s, 'fp', 'dale') && s.reinforcements.north.regular > 0) || fpStrategyLeft(s), apply: (s) => { if (recruitable(s, 'fp', 'dale')) placeForce(s, 'north', 'dale', { regular: 2 }); drawCard(s, 'fp', 'strategy'); } });
 register('fp-str-22', recruitChoiceCard('fp', [{ nation: 'dwarves', region: 'erebor' }], { leaders: [{ nation: 'dwarves', region: 'erebor' }] })); // Dáin Ironfoot's Guard
-register('fp-str-24', recruitChoiceCard('fp', [{ nation: 'elves', region: 'woodland-realm' }], { then: (s) => drawCard(s, 'fp', 'strategy') })); // Thranduil's Archers
+register('fp-str-24', recruitChoiceCard('fp', [{ nation: 'elves', region: 'woodland-realm' }], { then: (s) => drawCard(s, 'fp', 'strategy'), thenLive: fpStrategyLeft })); // Thranduil's Archers
 
 // (Interactive FP recruit cards — Círdan / Riders / Éomer — are registered below with
 // region-accurate targets.)
@@ -830,7 +838,8 @@ register('sh-str-11', {
     dst.units.isengard = du;
     if (src.regular === 0 && src.elite === 0) delete s.regions[t.from]!.units.isengard;
     t.count = takeR + takeE;
-    log(s, null, 'event', `Rage of the Dunlendings moves ${takeR + takeE} Isengard unit${takeR + takeE === 1 ? '' : 's'} from ${REGIONS[t.from]?.name ?? t.from} to ${REGIONS[to]?.name ?? to}`);
+    // The player moves them, not the card (player report 3q264331136q2272).
+    log(s, null, 'event', `Shadow moves ${takeR + takeE} Isengard unit${takeR + takeE === 1 ? '' : 's'} from ${REGIONS[t.from]?.name ?? t.from} to ${REGIONS[to]?.name ?? to}`);
   },
 });
 // Shadows on the Misty Mountains: "Recruit two Sauron units (Regular or Elite) and one
@@ -1149,7 +1158,10 @@ function shadowMovingMoves(state: GameState, applied: EventTarget[] = []): Event
       // Adjacent-only, so `range: 1` tells the UI there is no route to walk: this card
       // is a plain one-region Army move (player report 6124175c5o6r2f1r). No stacking
       // pre-filter - see shadowsGatherMoves.
-      if (freeForMovement(state, to, 'shadow')) out.push({ from, to, range: 1, ...(movable ? { movable } : {}) });
+      // Not into a region a card bars to the Shadow (A Power too Great, Tom Bombadil): the move
+      // itself refuses it, so offering it was an offered-then-refused move (soak 2026-11-23:
+      // Parth Celebrant -> Lórien under A Power too Great).
+      if (freeForMovement(state, to, 'shadow') && !shadowBarredFromRegion(state, to as RegionId)) out.push({ from, to, range: 1, ...(movable ? { movable } : {}) });
     }
   }
   return out;
@@ -1277,8 +1289,13 @@ register('fp-char-22', {
     if (!t.region) return; // a "goes with him" pick: recorded, nothing moves yet
     const o = aragornRohanOrigin(state); if (!o) return;
     const region = t.region, dst = state.regions[region]!;
-    // 1. Move Strider/Aragorn + the Companions chosen to go with him.
-    const chosen = new Set([o.ranger, ...applied.filter((a) => a.companion && !a.region).map((a) => a.companion!)]);
+    // 1. Move Strider/Aragorn + the Companions chosen to go with him — picked one at a
+    //    time beforehand, or named all at once as the move's `group` (the map's
+    //    Companion picker, player report m6mk0a18j9oksjwf).
+    for (const c of t.group ?? []) {
+      if (!COMPANION_SET.has(c) || !o.force.characters.includes(c)) throw new Error(`${characterDef(c)?.name ?? c} is not standing with ${characterDef(o.ranger)?.name ?? o.ranger}.`);
+    }
+    const chosen = new Set([o.ranger, ...(t.group ?? []), ...applied.filter((a) => a.companion && !a.region).map((a) => a.companion!)]);
     const moving = o.force.characters.filter((c) => chosen.has(c));
     o.force.characters = o.force.characters.filter((c) => !chosen.has(c));
     dst.characters.push(...moving);
@@ -1375,8 +1392,14 @@ function dayNightMoves(state: GameState): EventTarget[] {
     // hold another Shadow Army; this card "does not require the presence of an Army in
     // the destination region", and a round trip still takes the empty Settlement it
     // passes through (player report 6z2m220l620p5r0g). Offered when there is a first
-    // step to take; the route is traced, or the quiet one is used.
-    if (reach.size > 0 && out.length < 120) out.push({ from, to: from, range: DAY_NIGHT_RANGE });
+    // step to take AND a way back in — the same quiet-route search the move itself runs:
+    // a passive North Regular in a besieging Army outside Dol Guldur could step out but
+    // never re-enter Sauron's region, so the round trip was offered and then refused
+    // (soak: seed 101423, human-like FP).
+    if (reach.size > 0 && out.length < 120
+      && quietCardPath(state, from as RegionId, from as RegionId, 'fp', ownNationsIn(state, from as RegionId, 'fp'), DAY_NIGHT_RANGE).length > 0) {
+      out.push({ from, to: from, range: DAY_NIGHT_RANGE });
+    }
   }
   return out;
 }
@@ -1453,6 +1476,19 @@ register('sh-str-12', {
 
 // --- Recruit + draw / upgrade cards ------------------------------------------
 // House of the Stewards: recruit a Gondor unit (R or E) with Boromir + draw 2 Strategy.
+const stewardsTargets = (state: GameState): EventTarget[] => {
+  const r = findCharacterRegion(state, 'boromir'); if (!r) return [];
+  // Room is measured where the unit would actually land: the boxed garrison (5) when
+  // Boromir is shut inside a besieged Stronghold, the open field (10) otherwise —
+  // the same seam placeUnits recruits through (p.28 opens Event-card recruiting to
+  // a besieged Stronghold).
+  const dest = eventRecruitTarget(state, r as RegionId, 'fp'); if (!dest) return [];
+  const pool = state.reinforcements.gondor; const room = dest.limit - forceUnitCount(dest.force);
+  const o: EventTarget[] = [];
+  if (room > 0 && pool.regular > 0) o.push({ nation: 'gondor', region: r, figure: 'regular', slot: 0 });
+  if (room > 0 && pool.elite > 0) o.push({ nation: 'gondor', region: r, figure: 'elite', slot: 0 });
+  return o;
+};
 register('fp-char-23', {
   // Printed precondition: "Play if Boromir is in a GONDOR region" — anywhere else
   // (Rohan, Rivendell, …) doesn't qualify.
@@ -1460,27 +1496,20 @@ register('fp-char-23', {
   // still plays for its two Strategy cards — effects apply "to the maximum extent
   // possible" (p.22; player report 2h042a1d0k5z4p23, Boromir in Osgiliath with the
   // Gondor reinforcements spent). The recruit step simply offers nothing.
-  canPlay: (state) => { const r = findCharacterRegion(state, 'boromir'); return !!r && REGIONS[r]!.nation === 'gondor'; },
-  targets(state) {
-    const r = findCharacterRegion(state, 'boromir'); if (!r) return [];
-    // Room is measured where the unit would actually land: the boxed garrison (5) when
-    // Boromir is shut inside a besieged Stronghold, the open field (10) otherwise —
-    // the same seam placeUnits recruits through (p.28 opens Event-card recruiting to
-    // a besieged Stronghold).
-    const dest = eventRecruitTarget(state, r as RegionId, 'fp'); if (!dest) return [];
-    const pool = state.reinforcements.gondor; const room = dest.limit - forceUnitCount(dest.force);
-    const o: EventTarget[] = [];
-    if (room > 0 && pool.regular > 0) o.push({ nation: 'gondor', region: r, figure: 'regular', slot: 0 });
-    if (room > 0 && pool.elite > 0) o.push({ nation: 'gondor', region: r, figure: 'elite', slot: 0 });
-    return o;
+  // The draw is only a reason while the Strategy deck holds a card (report
+  // 4p541q1s710v204k); with it empty the recruit has to be live.
+  canPlay(state) {
+    const r = findCharacterRegion(state, 'boromir');
+    return !!r && REGIONS[r]!.nation === 'gondor' && (fpStrategyLeft(state) || stewardsTargets(state).length > 0);
   },
+  targets: (state) => stewardsTargets(state),
   applyTarget(state, _s, t) { placeUnits(state, 'gondor', t.region!, t.figure === 'elite' ? 0 : 1, t.figure === 'elite' ? 1 : 0); },
   finalize(state) { drawCard(state, 'fp', 'strategy'); drawCard(state, 'fp', 'strategy'); },
 });
 // Kindred of Glorfindel: recruit an Elven unit (R or E) in Rivendell + draw 1 Strategy.
-register('fp-str-21', recruitChoiceCard('fp', [{ nation: 'elves', region: 'rivendell' }], { then: (s) => drawCard(s, 'fp', 'strategy') }));
+register('fp-str-21', recruitChoiceCard('fp', [{ nation: 'elves', region: 'rivendell' }], { then: (s) => drawCard(s, 'fp', 'strategy'), thenLive: fpStrategyLeft }));
 // Swords in Eriador: a North unit (R or E) in the Shire + a Dwarven unit (R or E) in Ered Luin, then draw.
-register('fp-str-20', recruitChoiceCard('fp', [{ nation: 'north', region: 'the-shire' }, { nation: 'dwarves', region: 'ered-luin' }], { then: (s) => drawCard(s, 'fp', 'strategy') }));
+register('fp-str-20', recruitChoiceCard('fp', [{ nation: 'north', region: 'the-shire' }, { nation: 'dwarves', region: 'ered-luin' }], { then: (s) => drawCard(s, 'fp', 'strategy'), thenLive: fpStrategyLeft }));
 // The Grey Company: in Strider's Army, upgrade one Regular to an Elite.
 // The Grey Company: in Strider/Aragorn's Army, upgrade one Regular to an Elite of the
 // SAME Nation — the player CHOOSES which Nation (his Army can hold several).
@@ -1499,8 +1528,10 @@ register('fp-char-24', {
   // Requiring an upgradeable Regular as well refused the card in a position where the
   // draw was still a perfectly good reason to play it (p.23: effects apply "to the
   // maximum extent possible"; the Almanac says the same of King Brand's Men's draw).
-  // Report 476n3s6q0c1i2c2w.
-  canPlay: (state) => { const r = greyCompanyRegion(state); const f = r ? armyForceOf(state, r as RegionId, 'fp') : null; return !!f && forceUnitCount(f) > 0; },
+  // Report 476n3s6q0c1i2c2w. The draw needs a card left in the Strategy deck, though;
+  // with it empty the upgrade has to be live (report 4p541q1s710v204k).
+  canPlay: (state) => { const r = greyCompanyRegion(state); const f = r ? armyForceOf(state, r as RegionId, 'fp') : null;
+    return !!f && forceUnitCount(f) > 0 && (fpStrategyLeft(state) || greyCompanyNations(state, r!).length > 0); },
   targets: (state) => { const r = greyCompanyRegion(state); return r ? greyCompanyNations(state, r).map((nation) => ({ nation, region: r, figure: 'elite' as const })) : []; },
   applyTarget(state, _side, t) {
     const u = greyCompanyForce(state, t.region!)?.units[t.nation!];
@@ -1555,7 +1586,8 @@ register('sh-str-04', {
     state.dice.fp = kept;
     // Immediate card effects carry no card-name prefix, in the present tense (player
     // report 2p395t5k565r5o61).
-    log(state, null, 'event', `${removed} Free Peoples Will of the West ${removed === 1 ? 'die is' : 'dice are'} discarded`);
+    // The card as the subject (player report dhn5yj4qhap86d26).
+    log(state, null, 'event', `The Day Without Dawn discards ${removed} Free Peoples Will of the West ${removed === 1 ? 'die' : 'dice'}`);
   },
 });
 
@@ -1825,8 +1857,12 @@ register('sh-str-06', {
   targets: (state, _side, applied) => (applied?.length ? [] : stormcrowNations(state).map((nation) => ({ nation }))),
   applyTarget(state, _side, t) {
     const n = t.nation!;
-    state.nations[n].step = Math.min(3, state.nations[n].step + 1); // move back one step
-    log(state, null, 'event', `${n} is set back one step on the Political Track`); // no card prefix on an immediate effect (report 5x412l1p0k3t4l3o)
+    // No card prefix on an immediate effect (report 5x412l1p0k3t4l3o); worded like an
+    // advance, "Rohan withdraws one step from war (1 → 2)" (report 2x5b19454s6e0c69).
+    const was = state.nations[n].step;
+    state.nations[n].step = Math.min(3, was + 1); // move back one step
+    const ns = nationSubject(n);
+    log(state, null, 'event', `${ns.name} ${ns.plural ? 'withdraw' : 'withdraws'} one step from war (${was} → ${state.nations[n].step})`);
   },
   finalize(state, _side, applied) {
     const n = applied[0]?.nation; if (!n) return;
@@ -1837,7 +1873,7 @@ register('sh-str-06', {
   },
 });
 /** Every FP Nation, not yet At War, whose borders hold the Fellowship or a Companion. */
-function stormcrowNations(state: GameState): Nation[] {
+export function stormcrowNations(state: GameState): Nation[] {
   const inRegion = (id: string): Nation | null => {
     const def = REGIONS[id]!; const n = def.nation as Nation | null;
     return n && isFpNation(n) && state.nations[n].step > 0 ? n : null;
@@ -2166,12 +2202,11 @@ register('sh-char-14', {
       : Math.min(num, avail) > 0
         ? `${Math.min(num, avail)} Companion${Math.min(num, avail) === 1 ? '' : 's'} must separate — the Free Peoples choose which.`
         : 'No Companions separate.');
-    if (n === null) { log(state, null, 'event', 'The Breaking of the Fellowship: the tile shows an Eye (or a Fellowship special) — discarded without effect'); return; }
+    if (n === null) return; // the draw line says so
+    // A 0 tile legitimately separates nobody; the draw line above shows the number, so
+    // it no longer reads as the card doing nothing (player report: 'doesn't give you
+    // options to separate and does nothing').
     const k = Math.min(n, avail);
-    // EVERY branch logs the drawn number: a 0 tile legitimately separates nobody,
-    // but doing it silently read as the card being broken (player report: 'doesn't
-    // give you options to separate and does nothing').
-    log(state, null, 'event', `The Breaking of the Fellowship: tile number ${n} — ${k > 0 ? `${k} Companion${k === 1 ? '' : 's'} must separate` : 'no Companions separate'}`);
     if (k > 0) state.pendingChoice = { owner: 'fp', kind: 'breakingSep', data: { left: k } };
   },
 });
@@ -2352,7 +2387,10 @@ function nazgulFigureOnMap(state: GameState): boolean {
 function moveNazgulCard(after: (state: GameState) => void): EventHandler {
   return {
     canPlay: (state) => nazgulFigureOnMap(state),
-    repeat: 12,
+    // Two steps a move (pick, destination): 16 lets all eight figures (seven Nazgûl and
+    // the Witch-king) fly to eight different regions. At 12 the seventh and eighth could
+    // not move apart, though the card says "any or ALL".
+    repeat: 16,
     everyNazgul: true,                         // "any or ALL": room for every figure when following (followOptions)
     optionalFromStart: true,                   // "any or ALL" — moving zero is allowed
     targets(state, _side, applied = []) {
@@ -2571,21 +2609,17 @@ register('sh-char-09', {
 // The Nazgûl Strike! — move any/all Nazgûl; then, if one is with the Fellowship,
 // the card offers its printed CHOICE: "discard one Free Peoples Character Event
 // card from the table OR roll for the Hunt" (John's call D — the discard branch was
-// the last D13 residual). The choice is raised only when both branches are live: no
-// FP Character table card means the Hunt fires directly, exactly as before, so the
-// Shadow is never shown a one-answer question.
+// the last D13 residual). It is always asked, with "neither" as a third answer
+// (2026-11-23, John's call on the Almanac note below).
 register('sh-char-08b', {
   ...moveNazgulCard((state) => {
     if (nazgulWithFellowship(state)) {
       const tableFpChar = state.cards.fp.table.filter((id) => EVENT_BY_ID[id]?.deck === 'Character');
-      // "You may either discard … or roll for the Hunt": while following, asked also with no card to discard (the
-      // Hunt roll or nothing; followOptions.nazgulStrikeAsPrinted).
-      if (tableFpChar.length > 0 || followOptions.nazgulStrikeAsPrinted) {
-        state.pendingChoice = { owner: 'shadow', kind: 'nazgulStrike', data: { cards: tableFpChar } };
-        return;
-      }
-      log(state, null, 'event', 'The Nazgûl Strike! — Hunt roll');
-      extraHunt(state, { source: 'The Nazgûl Strike!' });
+      // "You MAY either discard … or roll for the Hunt": always a question, with "neither"
+      // among the answers. The Almanac: "it is almost always beneficial to the Shadow
+      // player to roll for the Hunt, but there can be situations where he may not want
+      // to (such as to avoid a reveal that would prevent his use of 'Cruel Weather' …)".
+      state.pendingChoice = { owner: 'shadow', kind: 'nazgulStrike', data: { cards: tableFpChar } };
     }
   }),
   canPlay: (state) => state.fellowship.mordor === null && state.fellowship.progress >= 1 && nazgulOnMap(state),
@@ -2607,10 +2641,16 @@ export function resolveNazgulStrike(state: GameState, discard?: string, decline 
     }
   }
   log(state, null, 'event', 'The Nazgûl Strike! — Hunt roll');
-  // "Roll for the Hunt (as if the Free Peoples player had moved the Fellowship)": while following, the Hunt roll itself
-  // (the Hunt box's dice, Flocks of Crebain first; no die enters the box); this engine draws a tile at once.
-  if (followOptions.nazgulStrikeAsPrinted) { resolveHunt(state, false); return; }
-  extraHunt(state, { source: 'The Nazgûl Strike!' });
+  nazgulStrikeHunt(state);
+}
+/** "Roll for the Hunt (as if the Free Peoples player had moved the Fellowship)" — a
+ *  real Hunt roll, not a bare tile draw: the Hunt Box dice (max 5) with the usual
+ *  re-rolls and FP-dice bonus, a tile only on a success, and an Eye worth the number
+ *  of successes (Almanac C 11: "a normal Hunt is triggered for all purposes"). No die
+ *  enters the Hunt Box, since no Action die moved the Fellowship. It used to draw a
+ *  tile straight away and throw an Eye out (player report yp4qcv008k4z6k7g). */
+function nazgulStrikeHunt(state: GameState): void {
+  resolveHunt(state, false);
 }
 
 // Return to Valinor: each non-besieged Elven Stronghold with Elven units takes a
@@ -2641,8 +2681,9 @@ register('sh-str-01', {
       const roll = rollDiceFaces(state, Math.min(u.regular + u.elite, 5), 6); // card: max 5 dice
       const hits = roll.hits;
       if (hits > 0) strikes.push({ side: 'fp', region: id, hits, nation: 'elves', spare: true, card: 'sh-str-01' });
-      // No card prefix (report 2d5o6e2472160r5w): the losses may be anywhere in the Stronghold's Army.
-      log(state, null, 'event', `${hits === 0 ? 'No' : hits} Elven unit${hits === 1 ? '' : 's'} ${hits === 1 ? 'departs' : 'depart'} from ${id} and ${hits === 1 ? 'sails' : 'sail'} for Valinor [${roll.dice.join(' ')}]`);
+      // The standard Event-card roll line; the losses themselves "sail for Valinor"
+      // (player report 0h4i6f5l6l2u6d00).
+      log(state, null, 'event', rollLine('Return to Valinor scores', roll, rName(id)));
       lines.push(`${rName(id)}: rolled [${roll.dice.join(' ')}], ${hits === 0 ? 'no hits' : `${hits} hit${hits === 1 ? '' : 's'}`}`);
     }
     notify(state, `Hitting on 6 — ${lines.join('; ')}.`, 'Return to Valinor');
@@ -2690,7 +2731,7 @@ register('fp-char-14', {
         r.characters = r.characters.filter((c) => c !== who.char);
         delete state.characters.inPlay[who.char];
         if (!state.characters.eliminated.includes(who.char)) state.characters.eliminated.push(who.char);
-        log(state, null, 'event', `Challenge of the King: all Eyes — ${characterDef(who.char)?.name ?? who.char} is lost`);
+        log(state, null, 'event', `${characterDef(who.char)?.name ?? who.char} falls before the gaze of Sauron`); // player report 5h2q1r5r0c510k6q
       }
     }
   },

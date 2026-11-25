@@ -132,7 +132,7 @@ export function describeAction(a: WotrAction, view?: GameState): string {
     // must not promise "the whole Army forward" — that reads as a decision already
     // made, and the picker it opens then looked like a stray second pop-up.
     case 'advanceHoldBack': return a.back ? 'Keep some figures back' : 'Choose who stays forward…';
-    case 'nazgulStrike': return a.discard ? `Discard ${cardName(a.discard)} from the table` : 'Roll for the Hunt';
+    case 'nazgulStrike': return a.decline ? 'Neither (no discard, no Hunt roll)' : a.discard ? `Discard ${cardName(a.discard)} from the table` : 'Roll for the Hunt';
     case 'advanceChoice': return !a.advance ? 'Hold position (no capture)' : a.move ? 'Advance the chosen forces' : 'Advance… (choose forces)';
     case 'chooseCasualties': return a.plan === 'regularsFirst' ? 'Lose Regulars first' : 'Reduce Elites first';
     case 'casualtyStep': {
@@ -180,6 +180,7 @@ export function describeAction(a: WotrAction, view?: GameState): string {
     // buttons don't repeat it (report 6r5i5b0o1u4i5x3k).
     case 'bonusDraw': return a.deck === 'none' ? 'Don’t draw' : `Draw a ${cap(a.deck)} card`;
     case 'guideDraw': return a.draw ? 'Draw a card' : 'Don’t draw';
+    case 'guideChoice': return view?.fellowship.guide === a.companion ? `Keep ${charName(a.companion)} as the Guide` : `Make ${charName(a.companion)} the Guide`;
     case 'sorcererDraw': return a.draw ? 'Draw a card' : 'Don’t draw';
     case 'lureChoice': return a.mode === 'corruption' ? 'Use the Ring' : 'Eliminate the Companion';
     case 'stormcrowLoss': return `Lose ${nationName(a.nation)} ${a.figure === 'leader' ? 'Leader' : a.figure === 'elite' ? 'Elite' : 'Regular'} in ${rName(a.region)}`;
@@ -191,6 +192,7 @@ export function describeAction(a: WotrAction, view?: GameState): string {
     // The Ents Awake's decline had no label, so the button showed raw action data
     // (player reports xs3bbc2rum6kcaq4, 4p4m4x285o2c200m).
     case 'freeCharEvent': return 'Don’t play a Character Event card';
+    case 'setPreference': return a.alwaysAskCombatCard ? 'Always ask me about Combat cards' : 'Ask me about Combat cards only when I can play one';
     // Exhaustive: a new action kind without a label is a type error, not raw JSON on a button.
     default: { const unlabeled: never = a; return JSON.stringify(unlabeled); }
   }
@@ -306,7 +308,7 @@ export function dieOptions(a: WotrAction, view: GameState, you: Side): DieFace[]
 
 // The mid-resolution decisions surfaced in the DecisionModal (combat + hunt),
 // kept out of the plain action-button list.
-const DECISION_KINDS = new Set(['playCombatCard', 'chooseCasualties', 'casualtyStep', 'advanceHoldBack', 'advanceChoice', 'nazgulStrike', 'combatContinue', 'combatRetreat', 'retreatTo', 'preCombatRetreat', 'eaglesRefuge', 'cardRetreat', 'combatKill', 'siegeWithdraw', 'siegeExtend', 'relieveAdvance', 'combatCardCost', 'besiegerAdvance', 'heroicDeath', 'wordsOfPower', 'whiteRider', 'balrog', 'crebain', 'huntDamage', 'huntPreventDraw', 'huntRedraw', 'bonusDraw', 'guideDraw', 'sorcererDraw', 'lureChoice', 'removeExcess', 'stormcrowLoss', 'breakingSep', 'discardCard', 'wornDiscard']);
+const DECISION_KINDS = new Set(['playCombatCard', 'chooseCasualties', 'casualtyStep', 'advanceHoldBack', 'advanceChoice', 'nazgulStrike', 'combatContinue', 'combatRetreat', 'retreatTo', 'preCombatRetreat', 'eaglesRefuge', 'cardRetreat', 'combatKill', 'siegeWithdraw', 'siegeExtend', 'relieveAdvance', 'combatCardCost', 'besiegerAdvance', 'heroicDeath', 'wordsOfPower', 'whiteRider', 'balrog', 'crebain', 'huntDamage', 'huntPreventDraw', 'huntRedraw', 'bonusDraw', 'guideDraw', 'guideChoice', 'sorcererDraw', 'lureChoice', 'removeExcess', 'stormcrowLoss', 'breakingSep', 'discardCard', 'wornDiscard']);
 export const isDecisionAction = (a: WotrAction): boolean => DECISION_KINDS.has(a.kind);
 
 /** A "simple" event-card target: a pure pick (recruit figure, deck, nation, done…)
@@ -378,7 +380,8 @@ function eventTargetText(a: Extract<WotrAction, { kind: 'eventTarget' }>): strin
     // There Is Another Way offers ONE of hide/move (whichever the Fellowship can do) —
     // a yes/no, under a "Hide the Fellowship?" / "Move the Fellowship?" heading (player
     // report 3q2t3v090r6f6k0v: "Do neither" read as a third choice).
-    return a.mode === 'hide' ? 'Yes — hide the Fellowship' : a.mode === 'move' ? 'Yes — move the Fellowship (triggers a Hunt)' : 'No';
+    // Named actions, not Yes / No, like the other prompts (player report 5l6v2x3z0e0o1s25).
+    return a.mode === 'hide' ? 'Hide the Fellowship' : a.mode === 'move' ? 'Move the Fellowship (triggers a Hunt)' : 'Skip';
   }
   if (a.eye) return a.face ? `turn ${aFace(a.face)} die into an Eye (→ Hunt Box)` : `turn a die into an Eye (→ Hunt Box)`;
   // Dreadful Spells names its victim army and nothing else — say so, or the bare

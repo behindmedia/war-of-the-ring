@@ -8,8 +8,8 @@
 // and may reveal to reduce damage by 1 — all as `huntDamage` choice options.
 // Still deferred: "play on the table" damage-cancel cards (Axe & Bow, Mithril
 // Coat — they land with the on-table event-handler increment).
-import type { GameState } from './types';
-import { STANDARD_TILE_LIST, SPECIAL_TILE_BY_CARD, REGIONS, levelOf, characterDef, EVENT_BY_ID, followOptions, type HuntTileDef } from './data';
+import type { GameState, Nation } from './types';
+import { STANDARD_TILE_LIST, SPECIAL_TILE_BY_CARD, REGIONS, levelOf, characterDef, EVENT_BY_ID, sideOfNation, followOptions, type HuntTileDef } from './data';
 import { fellowshipDieSkipsHuntBox, wornWithSorrowActive } from './persistent';
 import { withRng } from './rng';
 import { settlementController, armySide, heldShadowStronghold, fellowshipRegion } from './armies';
@@ -159,7 +159,8 @@ function specialOf(tile: HuntTileDef): { special?: 'fp' | 'shadow'; specialCard?
  *  special", without saying which (player report 4s2j2m6m4n3k192l). */
 /** The tile as the draw line names it: "an Eye", "a 2 (reveal)", "a die tile". */
 function drawnLabel(tile: HuntTileDef): string {
-  if (tile.card) return `the “${tile.card}” tile`;
+  // Named plainly, like a card (player report 0g0v1k2w0y3h2o5b).
+  if (tile.card) return tile.card;
   if (tile.value === 'eye') return 'an Eye';
   if (tile.value === 'die') return 'a die tile';
   return `a ${tile.value}${tile.reveal ? ' (reveal)' : ''}`;
@@ -183,7 +184,24 @@ function logDraw(state: GameState, tile: HuntTileDef, damage: number, source?: s
  *  otherwise applies directly. Reveal is applied with the resolution. `opts.source`
  *  names the Event card that caused a no-roll draw (shown in the FP's damage prompt);
  *  `opts.noReduce` bars the damage-reduction options (Isildur's Bane). */
-export type HuntOpts = { noReduce?: boolean; forceRandomCasualty?: boolean; source?: string };
+export type HuntOpts = { noReduce?: boolean; forceRandomCasualty?: boolean; source?: string; ignoreReveal?: boolean };
+/** The Fellowship stands in a City or Stronghold of a Free Peoples NATION, whoever holds
+ *  it now. Balrog of Moria ignores a Reveal icon there: "this applies even if the
+ *  Settlement has been captured by the Shadow player; the remnant of that captured
+ *  Settlement offers the Fellowship some protection in this case" (Almanac). */
+export function fellowshipInFpCityOrStronghold(state: GameState): boolean {
+  const def = REGIONS[state.fellowship.location];
+  return (def?.settlement === 'City' || def?.settlement === 'Stronghold') && !!def.nation && sideOfNation(def.nation as Nation) === 'fp';
+}
+/** Gollum may reveal to reduce Hunt damage only while hidden, and not with no Progress
+ *  left in a City or Stronghold the Free Peoples still hold: the reveal could only end
+ *  there, which is barred (Almanac, Gollum: "cannot use his ability to reveal the
+ *  Fellowship in Lórien"). */
+export function gollumMayReveal(state: GameState): boolean {
+  const fs = state.fellowship;
+  if (fs.guide !== 'gollum' || !fs.hidden) return false;
+  return fs.mordor !== null || fs.progress > 0 || !fellowshipInFpCityOrStronghold(state) || settlementController(state, fs.location) !== 'fp';
+}
 /** `extra` marks a draw with no Hunt roll of its own (a Shadow Stronghold reveal, an
  *  Event card, the Balrog): its record names the source instead of carrying the last
  *  Hunt's dice, which the popup used to show as if they had been rolled for it
@@ -205,7 +223,8 @@ function applyHuntTile(state: GameState, tile: HuntTileDef, successes: number, o
   // a number ("Give it to Uss!" is a 1 with a reveal icon): its reveal always applies,
   // so Gollum can neither ignore it nor reveal on top of it to reduce the damage
   // (Almanac, Gollum (ii)-(iii); player report osf97egfulfaixb3).
-  const revealIcon = !!tile.reveal, numbered = typeof tile.value === 'number' && !tile.introducedBy;
+  const revealIcon = !!tile.reveal && !opts.ignoreReveal, numbered = typeof tile.value === 'number' && !tile.introducedBy;
+  if (tile.reveal && opts.ignoreReveal) log(state, null, 'hunt', `The tile's Reveal icon is ignored: the Fellowship was declared in ${REGIONS[fs.location]!.name ?? fs.location}`);
   const reveal = revealIcon && !gollumIgnoresReveal(state, numbered);
 
   // Record every draw (even 0/blank) for the UI's informational popup. Newest last,
@@ -229,29 +248,27 @@ function applyHuntTile(state: GameState, tile: HuntTileDef, successes: number, o
 
   // Foul Thing from the Deep: "the Free Peoples player must reduce Hunt Damage (if
   // any) by eliminating a random Companion (unless there are no Companions in the
-  // Fellowship) before using the Ring" — the first reduction is FORCED and random,
-  // not the FP's choice (player report: the card resolved as a plain extra Hunt).
-  // Any damage left after the casualty resolves normally.
-  if (opts.forceRandomCasualty && state.fellowship.companions.length > 0) {
-    const victim = withRng(state, (rng) => rng.pick(fs.companions));
-    // No "a random Companion must be eliminated" preamble: the casualty line just below
-    // already says who was chosen at random (player report 704h4d3l6n3r1n0d).
-    const level = eliminateCompanionInline(state, victim, damage, 'random');
-    damage = Math.max(0, damage - level);
-    // The casualty may have made Gollum the Guide — re-ask whether the icon still reveals.
-    if (damage === 0) {
-      const rv = revealIcon && !gollumIgnoresReveal(state, numbered);
-      logHuntResolved(state, 0);
-      if (rv) beginReveal(state);
-      return;
-    }
+  // Fellowship) before using the Ring" — the casualty is FORCED and random, not the
+  // FP's choice (player report: the card resolved as a plain extra Hunt). The Almanac
+  // orders it: Axe and Bow / Horn of Gondor, then Guide abilities, "Then, if damage is
+  // still one or more, a random Companion must be picked … Any surplus damage must be
+  // taken as direct Corruption." So the reductions are offered first, the random pick
+  // follows, and it is this Hunt's ONE casualty (p.42) — it used to leave the FP a
+  // second, chosen casualty for the remainder (player report 8x25qmxylu5j32tr: Merry
+  // and then Boromir both fell to one tile).
+  if (opts.forceRandomCasualty && fs.companions.length > 0) {
+    state.pendingChoice = { owner: 'fp', kind: 'huntDamage', data: { damage, reveal, revealIcon, numbered, forceRandom: true, ...(opts.source ? { source: opts.source } : {}) } };
+    forceRandomIfNoChoice(state);
+    return;
   }
 
   // Isildur's Bane: "Hunt damage may not be reduced in any way before using the
   // Ring" — ruled (per playtester Samuel Carey, confirming the community ruling) as
   // STRAIGHT CORRUPTION: no reductions AND no Guide/Companion casualty either.
   if (opts.noReduce) {
-    sufferCorruption(state, damage, `from ${opts.source ?? 'the Hunt'} — no reduction or casualty allowed`);
+    // The log keeps the ordinary "for using the Ring" line; the why lives in the
+    // Hunt popup (player report 3s1e2r2i0a4c646r).
+    sufferCorruption(state, damage, 'for using the Ring');
     if (reveal) beginReveal(state);
     return;
   }
@@ -283,7 +300,7 @@ const hasOnTableReducer = (state: GameState): boolean =>
 export function huntReductionAvailable(state: GameState, revealDue = false): boolean {
   const fs = state.fellowship;
   return fs.guide === 'meriadoc' || fs.guide === 'peregrin'
-    || (!revealDue && fs.guide === 'gollum' && fs.hidden) || hasOnTableReducer(state);
+    || (!revealDue && gollumMayReveal(state)) || hasOnTableReducer(state);
 }
 
 /** Gollum as Guide ignores a tile's REVEAL icon — but only on a standard NUMBERED
@@ -307,7 +324,20 @@ type HuntDamageData = {
   damage: number; reveal: boolean; revealIcon?: boolean; numbered?: boolean;
   /** Gollum has spent his reveal-to-reduce: the reveal is his own, not the tile's. */
   gollumReveal?: boolean; casualty?: boolean; source?: string;
+  /** Foul Thing from the Deep: the casualty is a forced RANDOM pick, after any
+   *  reductions (Almanac). Only meaningful until `casualty` is set. */
+  forceRandom?: boolean;
 };
+/** Foul Thing's forced pick is still owed (damage left, a Companion to take). */
+export const forcedRandomOwed = (state: GameState, d: { damage?: number; forceRandom?: boolean; casualty?: boolean } | undefined): boolean =>
+  !!d?.forceRandom && !d.casualty && (d.damage ?? 0) > 0 && state.fellowship.companions.length > 0;
+/** With no reduction left to choose, Foul Thing's random pick is not a decision —
+ *  make it at once. */
+function forceRandomIfNoChoice(state: GameState): void {
+  const d = state.pendingChoice?.data as HuntDamageData | undefined;
+  if (state.pendingChoice?.kind !== 'huntDamage' || !forcedRandomOwed(state, d)) return;
+  if (!huntReductionAvailable(state, revealDueNow(state, d!))) resolveHuntDamage(state, 'random');
+}
 /** Is a reveal due, given the CURRENT Guide? */
 const revealDueNow = (state: GameState, d: HuntDamageData): boolean =>
   !!d.gollumReveal || (d.revealIcon !== undefined
@@ -364,7 +394,18 @@ function applyDrawnTile(state: GameState, tile: HuntTileDef, successes: number, 
 export function resolveHuntPreventDraw(state: GameState, prevent: boolean): void {
   const d = state.pendingChoice!.data as { successes: number; onMordor: boolean; extra?: HuntOpts };
   state.pendingChoice = null;
-  if (prevent) { discardTableCard(state, WIZARD_STAFF); log(state, null, 'hunt', 'Free Peoples discard Wizard’s Staff to prevent the Hunt tile draw'); return; }
+  if (prevent) {
+    discardTableCard(state, WIZARD_STAFF); log(state, null, 'hunt', 'Free Peoples discard Wizard’s Staff to prevent the Hunt tile draw');
+    // No tile means no Stop, so the Fellowship still takes its step: "Using this card
+    // inside Mordor would result in an effective free move on the Mordor Track"
+    // (Almanac, Wizard's Staff; player report 62274m0f58415m1o).
+    const fs = state.fellowship;
+    if (!d.extra && d.onMordor && fs.mordor !== null) {
+      fs.mordor = Math.min(5, fs.mordor + 1);
+      log(state, null, 'fellowship', `Fellowship advances to Mordor step ${fs.mordor}`);
+    }
+    return;
+  }
   if (d.extra) { doExtraDraw(state, d.extra); return; }
   doHuntDraw(state, d.successes, d.onMordor);
 }
@@ -450,15 +491,19 @@ export function challengeOfTheKing(state: GameState, who = 'Strider/Aragorn'): b
   const refs = [drawTile(state), drawTile(state), drawTile(state)];
   const allEyes = refs.every((r) => r.tile.value === 'eye');
   for (const r of refs) {
-    if (!allEyes && r.tile.value === 'eye' && 'std' in r.ref) {
-      const i = state.hunt.drawn.lastIndexOf(r.ref.std); // permanently remove (don't return to pool)
-      if (i >= 0) state.hunt.drawn.splice(i, 1);
+    if (!allEyes && r.tile.value === 'eye') {
+      // "Discard permanently the drawn tiles bearing an Eye" (card text) — The Ring is
+      // Mine! bears one too, and used to go back into the pool. A drawn special tile
+      // already stays out for good, so only a standard Eye needs taking off the pile.
+      if ('std' in r.ref) {
+        const i = state.hunt.drawn.lastIndexOf(r.ref.std);
+        if (i >= 0) state.hunt.drawn.splice(i, 1);
+      }
     } else {
       returnTileToPool(state, r.ref);
     }
   }
   const face = (v: number | 'eye' | 'die') => (typeof v === 'number' ? String(v) : v === 'eye' ? 'Eye' : 'die');
-  const drew = refs.map((r) => face(r.tile.value)).join(', ');
   const removed = allEyes ? 0 : refs.filter((r) => r.tile.value === 'eye').length;
   // The player sees the three tiles themselves, like a Hunt draw (player request:
   // show the tiles + result, not just a silent log line).
@@ -467,9 +512,13 @@ export function challengeOfTheKing(state: GameState, who = 'Strider/Aragorn'): b
     : removed
       ? `${removed} Eye tile${removed === 1 ? '' : 's'} permanently removed from the Hunt Pool; the other tiles go back into it.`
       : 'No Eyes drawn — nothing is removed, and the tiles go back into the Hunt Pool.');
-  // The log line names the draw too (player report 5y4646420q6j1c2f: "Eye tiles
-  // removed" said neither which nor whether any were).
-  if (!allEyes) log(state, null, 'event', `Challenge of the King: drew ${drew} — ${removed ? `${removed} Eye tile${removed === 1 ? '' : 's'} permanently removed from the Hunt Pool` : 'no Eyes drawn, nothing removed'}`);
+  // One log line per tile drawn, then one per Eye destroyed — naming The Ring Is
+  // Mine! apart from a plain Eye (player reports 5y4646420q6j1c2f, 5h2q1r5r0c510k6q).
+  // The rule itself (Eyes leave, the rest go back) is the popup's to explain.
+  for (const r of refs) log(state, null, 'event', `Free Peoples draw ${r.tile.card ?? (r.tile.value === 'eye' ? 'an Eye' : r.tile.value === 'die' ? 'a die tile' : `a ${face(r.tile.value)}`)}`);
+  if (!allEyes) {
+    for (const r of refs) if (r.tile.value === 'eye') log(state, null, 'event', `${who} destroys ${r.tile.card ?? 'an Eye'}`);
+  }
   return allEyes;
 }
 
@@ -484,6 +533,9 @@ export function drawHuntTileNumber(state: GameState, source: string, outcome: (n
     : typeof tile.value === 'number' ? tile.value
     : withRng(state, (rng) => rng.rollDie(6)); // 'die' tile: roll for the number
   recordCardDraws(state, source, [{ tile, ...(tile.value === 'die' && n !== null ? { rolled: n } : {}) }], outcome(n));
+  // The same draw line as a Hunt draw ("Shadow draws a 3"), not a card-specific
+  // "tile number 3" wording (player report 4p396o3y0p4o5z45).
+  logDraw(state, tile, 0, undefined, tile.value === 'die' && n !== null ? ` and rolls a ${n}` : n === null ? ', discarded without effect' : '');
   return n;
 }
 
@@ -518,7 +570,10 @@ function huntRoll(state: GameState, level: number, bonus: number, rerolls: numbe
     return { successes: hits, dice: faces, rerollDice: rfaces };
   });
   state.hunt.lastRoll = { level, bonus, dice, rerolls: rerollDice, successes, mordor: false };
-  log(state, null, 'hunt', `Hunt roll: ${level} ${level === 1 ? 'die' : 'dice'}${bonus ? ` (+${bonus})` : ''} [${dice.join(' ')}]${rerollDice.length ? ` re-roll [${rerollDice.join(' ')}]` : ''} → ${successes} success${successes === 1 ? '' : 'es'}`,
+  // Worded like a Combat roll — the faces, then what they needed (player report
+  // 460k046t6o5f223t): each die succeeds on 6 less the box bonus, never on a 1.
+  const need = Math.max(2, 6 - bonus);
+  log(state, null, 'hunt', `Hunt roll: [${dice.join(' ')}] on ${need}+${rerollDice.length ? ` re-roll [${rerollDice.join(' ')}]` : ''} → ${successes} success${successes === 1 ? '' : 'es'}`,
     { level, bonus, dice, rerolls: rerollDice, successes });
   if (successes >= 1) { beginHuntDraw(state, successes, false); return; }
   // A miss: record it so the player still SEES the roll (dice + box bonus) and knows
@@ -587,8 +642,10 @@ function finishHunt(state: GameState, damage: number, reveal: boolean): void {
  *  beginReveal. `before` is the Corruption before this damage was added. */
 function logHuntResolved(state: GameState, damage: number, before = state.fellowship.corruption): void {
   const now = state.fellowship.corruption;
+  // The damage itself, not the clamped difference: 5 at 8 Corruption is 5, though the
+  // track stops at 12 (player report 5g2c5e5s721x2r3f).
   log(state, null, 'hunt', damage > 0 && now > before
-    ? `The Ring-bearers suffer ${now - before} Corruption for using the Ring (${before} → ${now})`
+    ? `The Ring-bearers suffer ${damage} Corruption for using the Ring (${before} → ${now})`
     : `The Ring-bearers suffer no Corruption (${now})`);
 }
 /** "The Fellowship is revealed in X" — logged where the figure ends up (after the
@@ -620,8 +677,9 @@ function repromptOrFinish(state: GameState, damage: number, casualty = false): v
     state.pendingChoice = { owner: 'fp', kind: 'huntDamage', data: {
       damage, reveal,
       ...(prev.revealIcon !== undefined ? { revealIcon: prev.revealIcon, numbered: !!prev.numbered } : {}),
-      ...(prev.gollumReveal ? { gollumReveal: true } : {}),
+      ...(prev.gollumReveal ? { gollumReveal: true } : {}), ...(prev.forceRandom ? { forceRandom: true } : {}),
       ...(spent ? { casualty: true } : {}), ...(prev.source ? { source: prev.source } : {}) } };
+    forceRandomIfNoChoice(state);
     return;
   }
   finishHunt(state, damage, reveal);
@@ -680,12 +738,16 @@ export function resolveHuntDamage(state: GameState, mode: 'corruption' | 'guide'
   // reduceSeparate is handled in the adapter (needs separateCompanion); it calls
   // reduceHuntDamageBySeparate. It should not reach here.
 
-  if (mode === 'corruption') { finishHunt(state, d.damage, revealDueNow(state, d)); return; } // take it all as Corruption
+  if (mode === 'corruption') {
+    if (forcedRandomOwed(state, d)) throw new Error('Foul Thing from the Deep: a random Companion must be eliminated before the Ring is used.');
+    finishHunt(state, d.damage, revealDueNow(state, d)); return; // take it all as Corruption
+  }
   // guide / random: eliminate exactly ONE Companion for the whole Hunt (p.42 —
   // "he must eliminate one Companion"; "any excess damage must still be taken as
   // Corruption"). A second casualty is not a legal way to soak the remainder
   // (player report: three Companions were spent on one tile).
   if (d.casualty) throw new Error('Only one Companion may be eliminated per Hunt (p.42) — any remaining damage must be taken as Corruption.');
+  if (mode === 'guide' && forcedRandomOwed(state, d)) throw new Error('Foul Thing from the Deep: the casualty must be a random Companion.');
   if (fs.companions.length > 0) {
     const victim = mode === 'guide'
       ? (fs.companions.includes(fs.guide) ? fs.guide : fs.companions[0]!)
@@ -731,6 +793,7 @@ function eliminateCompanionInline(state: GameState, id: string, damage: number, 
       ? fs.companions.reduce((b, c) => (levelOf(c) > levelOf(b) ? c : b), fs.companions[0]!)
       : 'gollum';
   }
+  state.flags.guideChoiceOwed = true; // the FP may name a different Guide (p.38) once the Hunt is done
   // Name the casualty. The log used to say only "damage N pending (FP decision)" and
   // then go quiet, so the sacrifice was invisible (player report: "it doesn't say what
   // the FP decision was — I assume Gandalf was sacrificed because he wasn't there
@@ -825,15 +888,17 @@ export function resolveWornWithSorrow(state: GameState, pick: 'hand' | string): 
     // cards in my hand disappeared"), the opponent sees only that a Character card
     // did (player report 3i3v4o2a2w5y3e15). Same treatment as hand-limit discards.
     (cards.discardFaceDown ??= []).push(card);
-    log(state, 'fp', 'event', `Worn with Sorrow and Toil: you randomly discard ${EVENT_BY_ID[card]?.name ?? card}`);
+    // The card that forced it in a trailing parenthetical, like every other triggered
+    // effect (player report 2u035b681r620p72).
+    log(state, 'fp', 'event', `Free Peoples randomly discard ${EVENT_BY_ID[card]?.name ?? card} (Worn with Sorrow and Toil)`);
     state.log[state.log.length - 1]!.card = card;
-    log(state, null, 'event', 'Worn with Sorrow and Toil: Free Peoples discard a random Character card');
+    log(state, null, 'event', 'Free Peoples discard a random Character card (Worn with Sorrow and Toil)');
     return;
   }
   const ti = cards.table.indexOf(pick);
   if (ti < 0 || !isChar(pick)) return;
   cards.table.splice(ti, 1);
   cards.discard.character.push(pick);
-  log(state, null, 'event', `Worn with Sorrow and Toil: the Shadow discards ${EVENT_BY_ID[pick]?.name ?? pick} from the Free Peoples' table`);
+  log(state, null, 'event', `Shadow discards ${EVENT_BY_ID[pick]?.name ?? pick} from the Free Peoples' table (Worn with Sorrow and Toil)`);
   state.log[state.log.length - 1]!.card = pick;
 }

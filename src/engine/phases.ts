@@ -17,6 +17,7 @@ import { sweepStrandedUnits, sweepAbandonedSieges, reindexBoardCharacters, chara
 import { REGIONS, sideOfNation, EVENT_BY_ID, followOptions } from './data';
 import { log, sideDoes, sufferCorruption } from './log';
 import { canPlayCard } from './handlers/registry';
+import { eligibleGuides, fellowshipPhaseHasChoice } from './fellowship';
 
 const opponent = (s: Side): Side => (s === 'fp' ? 'shadow' : 'fp');
 
@@ -185,6 +186,16 @@ export function advance(state: GameState): void {
       const fs = state.fellowship;
       if (fs.hidden && fs.progress > 0 && fs.mordor === null) { state.pendingChoice = { owner: 'fp', kind: 'revealMove' }; return; }
     }
+    // "The Free Peoples player may nominate a new Guide … when, during the course of a
+    // turn, the composition of the Fellowship changes (due to a Character being
+    // separated or eliminated from the Fellowship)" (p.38). The highest-Level Companion
+    // stepped in at once (so a Hunt in progress still has a Guide); the FP's pick is
+    // asked here, after whatever changed the Fellowship has resolved, and only when
+    // a Level tie leaves a real choice (player report 072s2y37376u6l0s).
+    if (state.flags.guideChoiceOwed) {
+      delete state.flags.guideChoiceOwed;
+      if (eligibleGuides(state).length > 1) { state.pendingChoice = { owner: 'fp', kind: 'guideChoice', data: {} }; return; }
+    }
     if (state.pendingCombat) {                    // drive the battle sub-machine
       combatStep(state);
       if (state.pendingChoice) return;
@@ -222,6 +233,15 @@ export function advance(state: GameState): void {
         state.phase = 'fellowship';
         continue; // loop top enforces the hand limit (discard choice) before awaiting FP
       case 'fellowship':
+        // Nothing to declare, no Mordor to enter, no other Guide to name: ending the
+        // phase is the only action, so it ends itself rather than wait on the Free
+        // Peoples (player report aihekly5hgvi5czw; a forced single option, as
+        // CLAUDE.md allows — the same reasoning as the Hunt allocation below).
+        if (!fellowshipPhaseHasChoice(state)) {
+          log(state, null, 'fellowship', 'Free Peoples end the Fellowship phase');
+          state.phase = 'huntAllocation';
+          continue;
+        }
         return; // await FP
       case 'huntAllocation': {
         // Exactly one legal number of Hunt dice is no choice at all — allocate it rather

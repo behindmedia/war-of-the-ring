@@ -4,9 +4,9 @@
 // miniatures), so armies render as informative tokens — side colour, regular vs
 // elite split, leader/Nazgûl pip. Without the downloaded map it falls back to
 // nation-coloured polygons; fully playable either way.
-import { memo, useMemo, useRef, useState, useCallback } from 'react';
+import { memo, useMemo, useRef, useState, useCallback, useEffect } from 'react';
 import { layoutTokensInPolygon } from 'digital-boardgame-framework';
-import { useBoardArt } from './artCache';
+import { useBoardArt, useCardArt } from './artCache';
 import { regionIds, regionPolygon, mapImage } from '../data/geometry';
 
 // Board crop rectangle (map-image pixel space) — see the note at its use site for
@@ -15,6 +15,12 @@ const BOARD_CROP = { x: 240, y: 2, w: 1511, h: 1318 };
 /** The printed Mordor Track's six steps on the board art (map pixels, measured off the
  *  board image): steps 0–4, then the Crack of Doom (5). The Ring-bearers' token stands
  *  on its step, as the figure does at the table (player report 0h2028003x3v361w). */
+/** The printed "The Guide of the Fellowship" box at the board's top right (map pixels,
+ *  measured off the board image): the Guide's Character card stands in it, as it does at
+ *  the table (player report 6a3h1i0i3c6b6c22). It fills the box's pale inner panel
+ *  (x 1758–1888, y 30–262): the card art is taller than wide, so at the panel's full
+ *  height it is a hair narrower and centres across it (player report 6p684h1c0e3m4g35). */
+const GUIDE_CARD = { x: 1758, y: 30, w: 130, h: 232 };
 const MORDOR_STEPS: readonly { x: number; y: number }[] = [
   { x: 1558, y: 897 }, { x: 1583, y: 928 }, { x: 1624, y: 942 }, { x: 1667, y: 936 }, { x: 1661, y: 894 }, { x: 1618, y: 894 },
 ];
@@ -23,9 +29,15 @@ const MORDOR_STEPS: readonly { x: number; y: number }[] = [
 // x=1920 — so their pole-of-inaccessibility anchor lands off-screen and the army
 // tokens vanish (player report). Clamping pulls only those back into view; anchors
 // already inside are untouched (pad < a normal region's inset from the edge).
+// The x-range clamped to is the board actually SHOWN, not the crop: a screen wider than
+// the crop shows printed board past its edges, and clamping to the crop pulled
+// Gorgoroth's Characters in from space that was in plain view (player report
+// ix7hd8yg5z0rxfzf). The crop is the fallback before the map has been measured.
 const TOKEN_PAD = 26;
-const clampToCrop = (p: { x: number; y: number }): { x: number; y: number } => ({
-  x: Math.min(Math.max(p.x, BOARD_CROP.x + TOKEN_PAD), BOARD_CROP.x + BOARD_CROP.w - TOKEN_PAD),
+type XRange = { lo: number; hi: number };
+const CROP_X: XRange = { lo: BOARD_CROP.x, hi: BOARD_CROP.x + BOARD_CROP.w };
+const clampInto = (p: { x: number; y: number }, xs: XRange = CROP_X): { x: number; y: number } => ({
+  x: Math.min(Math.max(p.x, xs.lo + TOKEN_PAD), xs.hi - TOKEN_PAD),
   y: Math.min(Math.max(p.y, BOARD_CROP.y + TOKEN_PAD), BOARD_CROP.y + BOARD_CROP.h - TOKEN_PAD),
 });
 import mapData from '../../assets/map.json';
@@ -34,7 +46,7 @@ import type { GameState, RegionId, Nation, Side } from '../engine/types';
 import { HuntIndicator } from './HuntIndicator';
 import { RingGlyph } from './RingIcon';
 import { useSettings } from './settings';
-import { charName, charMark } from './charInfo';
+import { charName, charMark, charDef } from './charInfo';
 import { regionOccupants, fellowshipMarkerPoint } from './tokenPlacement';
 
 // Characters render as small labelled discs near the region anchor so they're
@@ -93,11 +105,15 @@ export interface BoardHighlights {
   activate?: Set<RegionId>;      // separation destinations that ROUSE a nation (gold ★ banner)
 }
 
-export const Board = memo(function Board({ view, onPickRegion, onHoverRegion, highlights }: {
-  view: GameState; onPickRegion?: (id: RegionId) => void; onHoverRegion?: (id: RegionId | null) => void; highlights?: BoardHighlights;
+export const Board = memo(function Board({ view, onPickRegion, onHoverRegion, onHoverChar, highlights }: {
+  view: GameState; onPickRegion?: (id: RegionId) => void; onHoverRegion?: (id: RegionId | null) => void;
+  onHoverChar?: (id: string | null) => void; highlights?: BoardHighlights;
 }) {
   const W = mapImage.width, H = mapImage.height;
   const hl = highlights ?? {};
+  // The board's x-range on screen in the default view (see clampInto), measured below.
+  const [shownX, setShownX] = useState<XRange>(CROP_X);
+  const clampToCrop = useCallback((p: { x: number; y: number }) => clampInto(p, shownX), [shownX]);
   const art = useBoardArt(); // map_en.jpg (1920x1324), aligns 1:1 with the polygons
   // Let the player switch to the clean polygon map even when the art is downloaded.
   const [polyOnly, setPolyOnly] = useState(false);
@@ -168,7 +184,7 @@ export const Board = memo(function Board({ view, onPickRegion, onHoverRegion, hi
       }),
     )) : null;
     return { id, poly, fill, def, armies, layout, control, r, boxed, armyPoints, markerPoint };
-  }), [view]);
+  }), [view, clampToCrop]);
 
   // --- Zoom / pan (the whole map is detailed; let the player get close to read it).
   // The playable-area crop, in the map image's pixel space, HARDCODED here on
@@ -187,6 +203,23 @@ export const Board = memo(function Board({ view, onPickRegion, onHoverRegion, hi
   const setVb = (next: { x: number; y: number; w: number; h: number } | ((cur: { x: number; y: number; w: number; h: number }) => { x: number; y: number; w: number; h: number })) =>
     setOverride((cur) => (typeof next === 'function' ? next(cur ?? CROP) : next));
   const svgRef = useRef<SVGSVGElement>(null);
+  // `meet` letterboxes the crop: a container wider than the crop shows extra board on
+  // both sides (up to the image's own edges), and that is where tokens may stand.
+  useEffect(() => {
+    const el = svgRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const measure = () => {
+      const r = el.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) return;
+      const extra = Math.max(0, CROP.h * (r.width / r.height) - CROP.w) / 2;
+      const lo = Math.round(Math.max(0, CROP.x - extra)), hi = Math.round(Math.min(W, CROP.x + CROP.w + extra));
+      setShownX((cur) => (cur.lo === lo && cur.hi === hi ? cur : { lo, hi }));
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [CROP.h, CROP.w, CROP.x, W]);
   const drag = useRef<{ x: number; y: number; vx: number; vy: number; w: number; h: number; moved: boolean } | null>(null);
   const suppressClick = useRef(false);
   // Panning gets 15% of a viewport of slack past each crop edge, so a border region
@@ -262,6 +295,9 @@ export const Board = memo(function Board({ view, onPickRegion, onHoverRegion, hi
           is how everyone is used to seeing the board"), so nothing masks the art now.
           They are still authored in assets/blocked-areas.json for the Board Crop entry
           and the #blocked dev tab; the play board simply doesn't draw them. */}
+      {/* The Guide's card in the printed Guide box. Drawn BELOW the regions: no region
+          reaches the box, so its hover still lands, and it can never eat a region's click. */}
+      <GuideCard guide={view.fellowship.guide} onHover={onHoverChar} />
       {regionEls.map((e) => e && (
         <g key={e.id} onClick={() => pickRegion(e.id)}
           onMouseEnter={() => { onHoverRegion?.(e.id); setHoverId(e.id); }}
@@ -279,17 +315,6 @@ export const Board = memo(function Board({ view, onPickRegion, onHoverRegion, hi
             fillOpacity={boardArt ? (hl.selected === e.id ? 0.3 : hl.destinations?.has(e.id) || hl.activate?.has(e.id) || hl.sources?.has(e.id) ? 0.18 : 0) : (hl.selected === e.id ? 0.75 : 0.5)}
             stroke={hl.selected === e.id ? '#fff200' : hl.destinations?.has(e.id) || hl.activate?.has(e.id) ? '#ffd23f' : hl.sources?.has(e.id) ? '#5dff7a' : (boardArt ? 'none' : '#3a3a3a')}
             strokeWidth={hl.selected === e.id || hl.destinations?.has(e.id) || hl.activate?.has(e.id) ? 4 : hl.sources?.has(e.id) ? 3 : 1.2} />
-          {/* A Companion destination (separation or move) that would ROUSE a Free Peoples
-              Nation — a gold ★ banner so the player sees where landing calls it to war. */}
-          {hl.activate?.has(e.id) && (() => {
-            const p = clampToCrop({ x: e.poly[0]!.x, y: e.poly[0]!.y - 16 });
-            return (
-              <g style={{ pointerEvents: 'none' }}>
-                <circle cx={p.x} cy={p.y} r={9} fill="#3a2a00" stroke="#ffae20" strokeWidth={1.5} />
-                <text x={p.x} y={p.y + 4} fontSize={12} fontWeight="bold" fill="#ffd23f" textAnchor="middle">★</text>
-              </g>
-            );
-          })()}
           {/* settlement marker — control-coloured diamond, plus a red dashed ring
               while the Stronghold is under siege (defenders in the box). It used to
               carry the Settlement's VP value as a small superscript; that number sat
@@ -312,6 +337,21 @@ export const Board = memo(function Board({ view, onPickRegion, onHoverRegion, hi
                 <rect x={mx - 5} y={my - 5} width={10} height={10}
                   fill={e.control === 'shadow' ? '#a83232' : e.control === 'fp' ? '#2f4f9e' : '#fff'}
                   stroke="#222" strokeWidth={1} transform={`rotate(45 ${mx} ${my})`} />
+              </g>
+            );
+          })()}
+          {/* A Companion destination (separation or move) that would ROUSE a Free Peoples
+              Nation — a gold ★ banner so the player sees where landing calls it to war.
+              Only a City or Stronghold rouses, so it sits ON that Settlement's control
+              diamond, drawn over it; anchored at poly[0], an arbitrary border vertex, it
+              stood lopsided and often outside the region (player report 440s0c6z5l595f6z). */}
+          {hl.activate?.has(e.id) && (() => {
+            const anchor = e.layout?.anchor ?? e.poly[0]!;
+            const p = clampToCrop({ x: anchor.x - 16, y: anchor.y - 14 });
+            return (
+              <g style={{ pointerEvents: 'none' }}>
+                <circle cx={p.x} cy={p.y} r={9} fill="#3a2a00" stroke="#ffae20" strokeWidth={1.5} />
+                <text x={p.x} y={p.y + 4} fontSize={12} fontWeight="bold" fill="#ffd23f" textAnchor="middle">★</text>
               </g>
             );
           })()}
@@ -362,7 +402,7 @@ export const Board = memo(function Board({ view, onPickRegion, onHoverRegion, hi
               // so three looked like one (player report q8bcenpw09rcz13x).
               const half = ((ids.length - 1) / 2) * 15;
               const mid = clampToCrop({ x: ax, y: ay + dy });
-              const cx = Math.min(Math.max(mid.x, BOARD_CROP.x + TOKEN_PAD + half), BOARD_CROP.x + BOARD_CROP.w - TOKEN_PAD - half);
+              const cx = Math.min(Math.max(mid.x, shownX.lo + TOKEN_PAD + half), shownX.hi - TOKEN_PAD - half);
               return ids.map((id, i) => {
               const t = charToken(id);
               const c = { x: cx + (i - (ids.length - 1) / 2) * 15, y: mid.y };
@@ -486,6 +526,35 @@ function ArmyBadge({ x, y, scale, army, titleSuffix = '' }: { x: number; y: numb
   );
 }
 
+/** The Guide's Character card, in the printed Guide box. Without the downloaded card art
+ *  it is a plain card with the Guide's name and Level, so the box still reads. Hovering
+ *  it shows the card in the inspector, as the old "Guide:" chip did. */
+function GuideCard({ guide, onHover }: { guide: string; onHover?: (id: string | null) => void }) {
+  const art = useCardArt(guide);
+  const { x, y, w, h } = GUIDE_CARD;
+  const d = charDef(guide);
+  const [first, ...more] = charName(guide).split(' ');
+  const rest = more.join(' ');
+  return (
+    <g data-testid="guide-card" onMouseEnter={() => onHover?.(guide)} onMouseLeave={() => onHover?.(null)} style={{ cursor: 'help' }}>
+      <title>{`The Guide of the Fellowship: ${charName(guide)}`}</title>
+      {art
+        // Scaled to fit, never stretched: the card art is 906×1638 and the printed box
+        // is squatter (player report 0b0j5f5t544u5y63).
+        ? <image href={art} x={x} y={y} width={w} height={h} preserveAspectRatio="xMidYMid meet" />
+        : <>
+          <rect x={x} y={y} width={w} height={h} rx={8} fill="#f2e6c2" stroke="#7a5a1e" strokeWidth={2} />
+          <text x={x + w / 2} y={y + 22} fontSize={11} fill="#5a4a2a" textAnchor="middle">Guide</text>
+          {/* "Gandalf / the Grey", "Meriadoc / Brandybuck": the first word, then the rest. */}
+          {[first, rest].filter(Boolean).map((line, i) => (
+            <text key={i} x={x + w / 2} y={y + h / 2 + i * 18} fontSize={i ? 13 : 15} fontWeight="bold" fill="#2a2016" textAnchor="middle">{line}</text>
+          ))}
+          {d && <text x={x + w / 2} y={y + h - 16} fontSize={11} fill="#5a4a2a" textAnchor="middle">Level {d.level === 'inf' ? '∞' : d.level}</text>}
+        </>}
+    </g>
+  );
+}
+
 /** The Mordor Track drawn on the polygon board (the art prints its own): six steps
  *  joined in order, the last the Crack of Doom, steps behind the Ring-bearers dimmed. */
 function MordorSteps({ step }: { step: number | null }) {
@@ -524,7 +593,7 @@ function FellowshipMarker({ view, onPick, onHover, at }: {
   }
   const poly = regionPolygon(fs.location);
   if (!poly) return null;
-  const anchor = at ?? clampToCrop(layoutTokensInPolygon(poly, 1, { tokenRadius: 9 }).anchor);
+  const anchor = at ?? clampInto(layoutTokensInPolygon(poly, 1, { tokenRadius: 9 }).anchor);
   const x = anchor.x - 12, y = anchor.y - 12;
   return (
     // A click or hover on the marker is a click or hover on its region: the marker sits

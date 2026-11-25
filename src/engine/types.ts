@@ -438,11 +438,21 @@ export interface GameState {
      *  battle it started. `advance` offers it once nothing else is pending, and only if
      *  the Palantír is still on the table / Gandalf is still Guide by then. */
     actionEndDraw?: { palantir?: boolean; guideDeck?: 'character' | 'strategy' };
+    /** A Companion left the Fellowship (separated, eliminated, removed on the Mordor
+     *  Track), so the FP "may nominate a new Guide" (p.38). `advance` asks once the
+     *  action that changed the Fellowship has finished resolving, and only when more
+     *  than one Companion shares the highest Level — otherwise there is no choice. */
+    guideChoiceOwed?: boolean;
   };
   pendingChoice: PendingChoice | null;
   /** An interactive battle in progress, or null. */
   pendingCombat: PendingCombat | null;
   /** Winner once decided. */
+  /** Per-player choices that change the flow (not display): set by the player's own client
+   *  with a `setPreference` action. `alwaysAskCombatCard`: that side is asked for a Combat
+   *  card every round, even holding none it can play, so the skip does not tell the
+   *  opponent about the hand (⚙ Settings; John's call 2026-11-23). */
+  prefs?: { alwaysAskCombatCard?: Partial<Record<Side, boolean>> };
   winner: Side | null;
   winReason: string | null;
   /** Structured turn log (public + side-tagged entries). */
@@ -453,16 +463,24 @@ export interface GameState {
   notices?: { seq: number; msg: string; title?: string }[];
   /** The most recent finished battle, for the battle-outcome popup (public). seq
    *  marks a new battle so the popup shows each once. */
-  lastBattle?: {
-    seq: number; from: RegionId; to: RegionId; attacker: Side; rounds: number;
-    atkLosses: number; defLosses: number; captured: boolean; siege: boolean; outcome: string;
-    /** Who came out ahead (null: nobody — a mutual wipe, a withdrawal into a siege). */
-    victor?: Side | null;
-    atkRoll?: { dice: number[]; rerolls: number[]; target: number };
-    defRoll?: { dice: number[]; rerolls: number[]; target: number };
-    /** The final round's Combat-card extra attacks (see PendingCombat.cardRolls). */
-    cardRolls?: CardRoll[];
-  };
+  lastBattle?: BattleRecord;
+  /** The last few finished battles, oldest first (lastBattle is the newest). Two
+   *  battles can finish within one update — the opponent's casualty pick ends yours,
+   *  then they attack elsewhere — and the popup shows each in turn rather than only
+   *  the second (player report ij541aaphyxthzkn). */
+  recentBattles?: BattleRecord[];
+}
+
+/** A finished battle, as the battle-outcome popup shows it. */
+export interface BattleRecord {
+  seq: number; from: RegionId; to: RegionId; attacker: Side; rounds: number;
+  atkLosses: number; defLosses: number; captured: boolean; siege: boolean; outcome: string;
+  /** Who came out ahead (null: nobody — a mutual wipe, a withdrawal into a siege). */
+  victor?: Side | null;
+  atkRoll?: { dice: number[]; rerolls: number[]; target: number };
+  defRoll?: { dice: number[]; rerolls: number[]; target: number };
+  /** The final round's Combat-card extra attacks (see PendingCombat.cardRolls). */
+  cardRolls?: CardRoll[];
 }
 
 /** One Combat-card extra attack: whose, which card, before the Combat roll or after

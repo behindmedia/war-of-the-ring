@@ -36,7 +36,7 @@ function fight({ atkUnits, defUnits, defLeaders = 0, shadowCard = null, fpCard =
   // The battle modal / popup draw these as dice (player report 562h455s6y5o363v).
   const cardRolls = s.pendingCombat?.cardRolls ?? s.lastBattle?.cardRolls ?? [];
   return { s, msgs, cardRolls,
-    preIdx: msgs.findIndex((m) => m.includes('additional attack (before the Combat roll)')),
+    preIdx: msgs.findIndex((m) => /^Sudden Strike: \[/.test(m)),
     postIdx: msgs.findIndex((m) => m.includes('additional attack (after casualties)')),
     rollIdx: msgs.findIndex((m) => m.startsWith('Round 1 dice')) };
 }
@@ -61,6 +61,9 @@ function fight({ atkUnits, defUnits, defLeaders = 0, shadowCard = null, fpCard =
   const cr = cardRolls.find((r) => r.card === 'sh-str-13');
   check('...and is kept for the battle modal as dice', cr?.when === 'after' && cr.side === 'shadow' && cr.dice.length > 0
     && cr.hits === cr.dice.filter((d) => d >= cr.target).length, JSON.stringify(cardRolls));
+  // Dale is a City, so round 1 normally hits on 6+ for the attacker — but the card
+  // prints "5+" (Almanac: "Hits are scored only on 5 or more"; player report pdr0p7utegolu4dw).
+  check('...and hits on 5+ even attacking a City on round 1', cr?.target === 5 && msgs[postIdx]?.includes('on 5+'), msgs[postIdx] ?? 'none');
 }
 
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall ok');

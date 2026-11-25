@@ -71,8 +71,10 @@ base game, 2-player (Free Peoples = **FP**, Shadow = **SH**). Expansions and
   p.26 enforces the limit as an **end-of-action** obligation: "If, at the end of any
   action (for example, after moving or mustering troops), more than 10 units are in
   the same region, the excess units must be removed from the game by the controlling
-  player" (they return to reinforcements and may re-enter later). Mustering and
-  voluntary Army moves ask up front (`recruit`, `afterMove`), but an Army can also be
+  player" (they return to reinforcements and may re-enter later). Voluntary Army
+  moves ask up front (`afterMove`). Since 2026-11-23 a Muster die may recruit into a full
+  region and the same prompt trims it (see "Rule differences found by following another
+  engine"). An Army can also be
   pushed over involuntarily — chiefly by **retreating** (p.31) into a region that
   already holds a friendly Army, and also by card-driven moves and a lifting siege
   returning its garrison to the field. `enforceStackingLimit` in the adapter is the
@@ -360,6 +362,14 @@ die already showing an Eye.
   it used to read the control marker, which got both halves backwards *(player report,
   2026-08-28: "Candles of Corpses can't be played while the fellowship are in a
   settlement")*.
+  *Foul Thing from the Deep*'s forced random casualty follows the Almanac's order: Axe
+  and Bow / Horn of Gondor, then Guide abilities, "Then, if damage is still one or more,
+  a random Companion must be picked … Any surplus damage must be taken as direct
+  Corruption." The FP prompt offers only those reductions and the random pick (no
+  straight Corruption, no Guide casualty); with no reduction available the pick is made
+  at once (a forced single option). The pick is the Hunt's one casualty (p.42); the
+  remainder used to re-offer a chosen casualty, so two Companions fell to one tile
+  *(report 8x25qmxylu5j32tr)*.
   "Play if"/"Play on the table if" preconditions gate play (`canPlay`) for *The Last
   Battle*, *Denethor's Folly*, and *The Palantír of Orthanc* like every other
   precondition card — previously they could be played with the condition unmet and
@@ -428,6 +438,13 @@ die already showing an Eye.
   and then it pays with the Event/Will die unless the player picks otherwise), **or** the
   Fellowship in an unconquered Lórien with Corruption to heal. It used to demand a
   Character die even for the heal alone. `scripts/probe-mirror-galadriel.mjs`.
+  **A draw needs a card to draw** *(player report 4p541q1s710v204k, 2026-10-26)*. The
+  draw clause ("Then, draw one/two Strategy Event cards") makes *House of the Stewards*,
+  *The Grey Company*, *King Brand's Men*, *Celeborn's Galadhrim*, *Kindred of
+  Glorfindel*, *Swords in Eriador* and *Thranduil's Archers* playable on its own only
+  while the Free Peoples Strategy deck holds a card (an empty deck is not reshuffled,
+  p.22). With it empty the card needs its other clause live — a unit to recruit, or a
+  Regular to upgrade. `scripts/probe-triage-1026b.mjs`.
   **Not an exception:** a "null effect" card is *not* made playable by Gandalf the Grey
   guiding. Drawing through his ability costs the same Event die as the "Draw an Event
   card" action and additionally spends the card, so it is strictly worse — there is no
@@ -446,6 +463,13 @@ die already showing an Eye.
   Revealed** needs a Sauron Regular or a Nazgûl in reinforcements and a Minas Morgul the
   Shadow can recruit into; **Musterings of Long-planned War** needs a Southron Regular
   placeable in Gorgoroth or a Sauron Regular in Nurn. `scripts/probe-triage-1008c.mjs`.
+  **No card recruit lands in a Settlement the enemy has captured.** Almanac: "It is never
+  permitted to use any of these cards to recruit into a captured Shadow Settlement" (naming
+  *Monsters Roused*). The whole-card recruits asked only about an enemy Army, so an empty
+  captured Settlement took the figure *(player report l2qbeep3olo04yjh, 2026-11-02)*. The
+  shared placement now refuses it, the figure stays in reinforcements, and the card's other
+  regions recruit as printed. Only *Dead Men of Dunharrow* recruits into enemy control (FAQ
+  1.2), through its own path. `scripts/probe-triage-1102.mjs`.
   **A recruitment card with nothing to recruit is still playable for the rest of its
   text.** Almanac, "Points common to all Free Peoples recruitment cards": "These cards
   may still be played if recruitment is impossible (e.g., if the required Settlement has
@@ -873,6 +897,17 @@ chosen as casualties/advance) (p.28). All defenders are always in the battle.
   … thus the Shadow player doesn't get a chance to resolve the effects of their
   Combat card. That's the expected behavior, but now Dread and Despair resolved
   first." `scripts/probe-siege-destination-and-initiative.mjs`.
+  *Scouts* has two halves — "retreat your Army to an adjacent free region **or
+  withdraw into a siege**" (Card Text Reference; Almanac, Scouts: "The Free Peoples
+  Army may play this card to retreat into a Stronghold instead of to a different
+  region"). The second was missing: an Army that stood in the open before its own
+  unbesieged Stronghold now has that Stronghold among the destinations (clicked on
+  the map, the battle's own region), and the Shadow then decides whether to advance
+  and besiege, as with any withdrawal (p.31). With neither a free region nor a
+  Stronghold the card is **still playable** — its "Play if" asks only for a Free
+  Peoples Army defending in a field battle — and does nothing; the button says so
+  ("nowhere to retreat, so it would do nothing") rather than hiding the card (report
+  ngqb3corp8eecwqf). `scripts/probe-triage-1122.mjs`.
 
 ### Fortifications & Cities (p.31)
 First combat round only: attacker hits on **6+** (instead of 5+). Then normal.
@@ -1154,6 +1189,11 @@ resolver survives only for in-flight saves carrying an `advanceHoldBack` choice.
   the Balrog is asked **before**
   the Stronghold tiles and carries them with it (they draw once it is answered), so
   the card's one-shot is settled before Moria's own Stronghold tile comes out.
+  On a **declaration** into a City or Stronghold of a Free Peoples Nation the tile's
+  **Reveal icon is ignored** (card text), "even if the Settlement has been captured by
+  the Shadow player" (Almanac). Gollum's own reveal-to-reduce is barred with no Progress
+  left in one the Free Peoples still hold, as "the restriction on revealing into an
+  unconquered Free Peoples City or Stronghold" leaves him nowhere to end (Almanac).
   `scripts/probe-rules-batch-0917.mjs`.
   Declaring does **not** end the Fellowship phase: the FP may then change the Guide
   or, if the figure now sits at Morannon/Minas Morgul, **enter Mordor this same
@@ -1169,6 +1209,20 @@ resolver survives only for in-flight saves carrying an `advanceHoldBack` choice.
   the phase's last act — after any declaration or Mordor entry (player report
   6d5b4l4o6b4a630x; earlier a Guide could be named first, and entering Mordor shut
   the phase before a Guide change).
+  **UI guard:** because both ending the phase and naming a Guide close the only window
+  to enter Mordor, the side panel shows *Enter Mordor* as its own prominent button
+  whenever it is legal, and asks once ("enter Mordor first / anyway / cancel") before
+  either would end the phase without it (player reports kq8go7sm01b05hqx,
+  1a71ivyoeg7in1t4: a Guide change first cost a turn). Display only; the rules are
+  unchanged.
+  **Deviation:** when the Free Peoples have nothing to decide in the phase — no
+  declaration open (revealed, already declared this turn, or on the Mordor Track), not
+  at a Mordor entrance, and no other Companion tied for the highest Level to name as
+  Guide — the phase ends itself instead of waiting for "End the Fellowship phase" (a
+  forced single option; `fellowshipPhaseHasChoice`). This is every turn on the Mordor
+  Track unless a Level tie leaves a Guide to name. All of it is public information, so
+  the skip reveals nothing. *(Player report aihekly5hgvi5czw;
+  `scripts/probe-fellowship-phase-skip.mjs`.)*
 - **Balrog of Moria as a Combat card.** It may be discarded from the table to use its **Durin's Bane** Combat
   effect "as if you were playing the card from your hand" (Card Text Reference; player report
   221x631w3b3i4b1j) — offered in the Combat-card step whenever Durin's Bane's precondition holds.
@@ -1199,6 +1253,16 @@ resolver survives only for in-flight saves carrying an `advanceHoldBack` choice.
   Companion(s) from the Fellowship Box to the Ring-bearers' region, then move ≤
   (Progress step + Companion Level) regions (group: highest Level) (p.39). Remove
   their cards/counters; appoint new Guide. **Separation is permanent** (p.39).
+- **Re-nominating the Guide when the Fellowship changes** (p.38: "or when, during the
+  course of a turn, the composition of the Fellowship changes (due to a Character being
+  separated or eliminated)"). The highest-Level Companion steps in at once, so a Hunt
+  still resolving has a Guide (p.42's "repeat this step with the new Guide's abilities"
+  uses him). Once whatever changed the Fellowship has finished resolving, the FP is asked
+  (`guideChoice`) to keep him or name another Companion tied for the highest Level.
+  *Deviation:* with no Level tie there is no choice, so nothing is asked; and a tie
+  that arises mid-Hunt is settled after the Hunt rather than mid-tile — no two tied
+  Companions differ in a Hunt-relevant Guide ability (Meriadoc and Peregrin share theirs).
+  *(Player report 072s2y37376u6l0s; `scripts/probe-triage-1027.mjs`.)*
 
 ---
 
@@ -1418,6 +1482,73 @@ turn the FP reached 4 and still lost). Regression-tested in
 
 ---
 
+### Rule differences found by following another engine (2026-11-23)
+
+PR #1 (werner77's WotR Bot Protocol bot, merged 19c587b) replays a referee's game on our
+engine and switches on `followOptions` (data.ts) wherever the two engines disagreed. Each
+switch was checked against the card text and the Almanac.
+
+**Our engine was wrong. Fixed for every game; `scripts/probe-protocol-rule-diffs.mjs`:**
+- **Leadership is the owning side's.** `forceLeadership` read a Character of no Nation
+  (Gandalf, the Hobbits, Aragorn) as belonging to whichever side asked. So a Companion left in
+  a region that a Shadow Army entered added his Leadership to the Shadow's re-roll.
+- **Mighty Attack** forfeits "the Leadership of one Companion participating in the battle".
+  It is the cheapest, so 1, except Aragorn's 2 when he is the only Companion. It cost 1
+  whoever was there.
+- **Mighty Attack / Andúril:** "*before* rolling the dice for your Leader re-roll … change
+  one missed die roll to a hit." The miss used to be turned after the re-roll, which let
+  that die be re-rolled first: a free extra re-roll whenever Leadership covered every miss.
+- **Relentless Assault / Onslaught** may take every unit of the Army. The Almanac allows
+  it for both: "possible … but completely counterproductive" and "may eliminate all units
+  in the Shadow Army". The engine kept one back. The AI still spends only units above the
+  5-dice cap.
+- **"Move any or all of the Nazgûl"** cards stopped at 12 steps, which is 6 figures moved
+  apart. They now have 16, enough for all 8 figures (7 Nazgûl and the Witch-king).
+- **Mûmakil's** "more total hits than your opponent (including hits from any Free Peoples
+  pre-Combat attack from a Combat card)" now counts Charge / Sudden Strike hits from the
+  round. The Almanac says so explicitly.
+
+**Already fixed on main before the merge** (the switch is now a no-op or unused):
+- We Come to Kill rolls at 5+.
+- The Nazgûl Strike!'s Hunt is a real Hunt roll.
+- Scouts may withdraw into a siege.
+
+**Not rule bugs.** These are protocol bookkeeping, or a dominated option we don't ask:
+- `fpCasualtyOffset`: our Elite reduction already takes the Regular from casualties first
+  (p.30).
+- `reduceAlways`: we don't offer a 1-hit "reduce" of an Elite with no Regular to replace it
+  when 2+ hits are owed. Removing it for 2 is never worse.
+- `noEffectChoices` (Wisdom of Elrond on a Nation already At War).
+- `countedRecruits`, `revealStrongholds`, `playAsPlayed`, `sarumanRecruitIn`,
+  `dreadfulFrom`: these replay the referee's own choices.
+
+**John's calls (2026-11-23), official rulings used where they exist:**
+- **Muster into a full region: allowed.** p.26 checks the limit "at the end of any action
+  (for example, after moving or mustering troops)". No Almanac ruling covers Muster dice.
+  `recruit` no longer refuses up front. `enforceStackingLimit` raises `removeExcess`, and
+  the owner picks the unit that goes back to reinforcements (e.g. an Elite in, a Regular
+  out). The muster pop-up warns when the Army is full. The AI scores an over-limit muster
+  at −50, so its play is unchanged.
+- **Heals at 0 Corruption: allowed.** Almanac: *There Is Another Way* "Can be played if on
+  0 Corruption"; *Bilbo's Song* "Can be played if on 0 or 1 Corruption". *Athelas* has no
+  play condition and no ruling, so it is treated the same. This reverses the strengthened
+  conditions from reports 0k6e6n2c6m6g153q / 476n3s6q0c1i2c2w below. The screen asks "will
+  heal nothing — play it anyway?", and the AI scores them −5 at 0 Corruption.
+- **The Nazgûl Strike!: always asked, "neither" offered.** The Almanac's note on the card:
+  "almost always beneficial to the Shadow player to roll for the Hunt, but there can be
+  situations where he may not want to (such as to avoid a reveal that would prevent his
+  use of 'Cruel Weather' …)". The AI still discards a Hunt-defence card or rolls.
+- **Worn with Sorrow and Toil: unchanged.** There is no ruling, and declining a discard
+  of a Free Peoples card is never better for the Shadow.
+- **Combat card question with no playable card: a ⚙ setting, off by default.** The rulebook
+  (p.29) and the Almanac have cards "chosen secretly", so at the table nobody can tell "no
+  card" from "none playable". By default we still skip a side with nothing playable (one
+  fewer click and handoff per round). With "Every round" on, the player's client sends
+  `setPreference` on their move (online games only), `state.prefs.alwaysAskCombatCard[side]`
+  is set, and `asksCombatCard` (combat.ts) asks that side every round. `setPreference` is
+  never in `legalActions`, so no AI or bot sends it. This is John's explicit exception to
+  the display-only settings rule.
+
 ### Card clauses corrected from player reports (2026-09-23)
 
 - **"The Last Battle" (fp-str-01)** — the printed card carries a discard clause the
@@ -1543,7 +1674,12 @@ turn the FP reached 4 and still lost). Regression-tested in
   used to be unplayable with Aragorn inside a besieged Helm's Deep *(report
   0k5q531m3c4d3x5z)*. Each other Companion standing with him is an optional map pick
   (Almanac: "Any number of Companions with Strider/Aragorn may move along with him");
-  the destination is a map click *(reports 4r2y2p2l2e3g3p1h, 6d31266k0u535r11)*. A
+  the destination is a map click *(reports 4r2y2p2l2e3g3p1h, 6d31266k0u535r11)*. On the
+  map the party is chosen in the same Companion picker as every other Companion move,
+  Strider/Aragorn ticked and locked, and the destination click may name the whole
+  `group` at once. The move is **direct** — no range or route — so the map lights only
+  Erech, Lamedon and Pelargir; it used to light Aragorn's ordinary Level-3 walking range
+  and refuse the far ones *(report m6mk0a18j9oksjwf)*. A
   Shadow Army at the destination is **attacked** (Almanac: "this card is an 'attack'
   and so affects the Political Track"), takes a die of hits and retreats or is destroyed.
   The recruit is a 0–3 choice made after that roll ("may … up to" — the maximum-extent
@@ -1605,7 +1741,7 @@ the seeded `Rng`. Each deviation is listed here, next to its rule.
 
 | D12 | Fellowship revealed by the Hunt (p.39) | On reveal, the FP moves the figure up to Progress regions (its choice; never ending in an FP City/Stronghold), resets Progress, flips to Revealed; **+1 Hunt tile per Shadow Stronghold the traced path crosses** | **Fully modelled (RAW).** On reveal `beginReveal` raises a `revealMove` choice; the **FP picks the destination on the board** (within Progress, never an FP-controlled City/Stronghold — **including staying where it is**: the reveal moves "as described" for a declaration, "equal to or less than" the Progress, p.38; player report 5n1h4h4b3p2b3b32, `scripts/probe-reveal-stay.mjs`), the figure moves there, Progress resets, Revealed. **A Hunt tile is drawn per Shadow Stronghold on the traced path** (`extraHunt`), restoring the cost of revealing through Moria/Mordor. Only a Stronghold the Shadow **owns and still controls** counts (p.39 "a Shadow Stronghold still controlled by the Shadow player", `heldShadowStronghold`): a captured Free Peoples Stronghold such as Helm's Deep is Shadow-controlled but owes no tile (player report 0t4x0n0j2u436f4j). The Hunt re-roll and the Companion stop rule still read control alone. **Gollum's reduce-damage *reveal* is now a full reveal too** (figure-move + Progress reset, at the tile's reveal step — player report 484g5d6e162t361o), and **his ignore-the-icon is asked with the Guide who is standing there at that step**, so a mid-Hunt casualty that promotes him applies it to the tile already drawn (player report l61v0rpyl8vhrpcl). **Every Stronghold's tile is drawn**, in path order: they queue in `flags.owedStrongholdTiles` and `advance` draws the next whenever no choice is open, so a tile whose damage the FP must assign no longer drops the ones behind it (player report 3o0b353o6j735w53 — "a maximum of one Stronghold tile is drawn"; `scripts/probe-reveal-stronghold-tiles.mjs`). | — closed. (AI routes toward Morannon and can eat avoidable Stronghold Hunts — an AI-strength gap, not a rules one; a human picks the path.) |
 
-| D13 | "Move any or all Companions/Nazgûl" cards | Move separated Companions / Nazgûl freely, then a conditional effect | **Companion-move cards fully modelled.** *Book of Mazarbul* (fp-str-04) and *Fear! Fire! Foes!* (fp-str-07): the FP moves any/all separated Companions — interactively (pick a Companion, board-click its destination, repeat, or move none) — then if a Companion is in Erebor/Ered Luin (resp. The Shire/Bree) the Dwarves (resp. North) are roused to War (`moveCompanionsCard`, with a not-At-War-guarded rouse checked before AND after the moves). *(This also fixed a real bug: fp-str-04 previously roused the Dwarves UNCONDITIONALLY, skipping the "if a Companion is in Erebor/Ered Luin" check.)* **Nazgûl-reveal cards now fully modelled too.** *Nazgûl Search* (sh-char-09) and *The Nazgûl Strike!* (sh-char-08b): the Shadow moves any or all of the Nazgûl — interactively (pick a Nazgûl group's region, board-click its destination with FLY range, repeat across groups, or move none) — then if at least one Nazgûl shares the Fellowship's region the conditional effect fires: sh-char-09 reveals the Fellowship; sh-char-08b rolls an extra Hunt (`moveNazgulCard`, with the conditional run once in `finalize`). **Both Nazgûl cards are gated ONLY on their printed condition** — "Play if the Fellowship is on step 1 or higher on the Fellowship Track" — plus a Nazgûl existing to move. The reveal/Hunt half is an EFFECT, not a requirement (p.22: effects are "applied to the maximum extent possible"), so the very common play of using either card purely to REPOSITION the Nazgûl is legal. *(Player report 3i1v1v: they were additionally gated on a Nazgûl being able to reach the Fellowship — and, for sh-char-09, on the Fellowship being Hidden — which blocked that play entirely.)* **And sh-char-09's reveal is a real reveal:** it calls `beginReveal`, so the FP must move the figure up to its Progress and the Progress resets to 0 (p.39), exactly like a Hunt reveal — the choice survives because `finalize` runs after the eventTarget resolver clears the card's own pending choice. *(Player report 3k733e: the Fellowship stayed put with its Progress intact.)* `scripts/probe-play-via.mjs`. **sh-char-08b's printed choice is now offered** — "discard one FP Character Event card from the table or roll for the Hunt" raises a real `nazgulStrike` choice for the Shadow whenever both branches are live (no FP Character table card → the Hunt fires directly, so it is never a one-answer question). `scripts/probe-nazgul-strike.mjs`. **"Any or ALL of the Nazgûl" now means a SUBSET of a stack on every card.** *The Ringwraiths Are Abroad* (sh-char-23) and *The Black Captain Commands* (sh-char-24) build their own target lists and still flew the whole stack, while the Character die and the `moveNazgulCard` cards had long asked "how many?"; the same figures thus obeyed two different rules depending on how you moved them. `nazgulFlyTargets` now fans a Nazgûl group out to one target per count on all four cards (the Witch-king is one figure, so no count). *(Player report 0j1x6h3r: "Played Ringwraiths are Abroad … It didn't let me choose how many of them to move.")* **Each Nazgûl flies once — not each region once.** The cards used to block a whole region after any fly from or into it, so flying the Witch-king out of Mount Gundabad on *The Black Captain Commands* pinned the Nazgûl he left behind, and a stack could not split two ways. `unmovedNazgul` now counts the figures that have not yet flown on this card (the stack minus those that landed there); the map no longer offers a "move them all together" pick for Nazgûl figures, which only Companions can do. `scripts/probe-nazgul-card-fly.mjs`. *(Player report 2m6j6f1z5w07390y.)* **And the Witch-king is a Nazgûl on these two cards as well (p.25).** *Nazgûl Search* and *The Nazgûl Strike!* enumerated plain Nazgûl stacks only, so the one figure they could not move was the Witch-king — even though their own reveal/Hunt clause already checks his region for the Fellowship, and the other two Nazgûl cards have always flown him. He is offered as a pick (once per card, no count — he is one figure) and the play condition counts him, so a board where he is the last Ringwraith standing no longer refuses the card. *(Player report 5vw7t8btxx0r2dq7.)* **And the "or MOVE" branch of the separation cards is modelled.** *Gwaihir the Windlord* (fp-char-15) and *We Prove the Swifter* (fp-char-16) print "Separate from the Fellowship, **or move**, one Companion or one group of Companions" — that second branch used to be waved off as "folded into the Character-die move", which is wrong on three counts: it costs an **Event** die instead of a Character die, it carries the card's range bonus (Level-as-4 / +2 regions), and with an **empty Fellowship it is the only playable branch at all**. `separateViaCard({ mapMove: true })` now offers on-map Companions as picks tagged with their region (`from`); same-region Companions may join the travelling group (range = the highest Level, p.24) and `finalize` routes the `from`-tagged branch through `moveCompanionGroup`. *I Will Go Alone* (fp-char-11) and *There and Back Again* (fp-char-17) print no such clause and stay separate-only. `scripts/probe-companion-card-move.mjs`. *(Player report 4964174f: "T8: Wanted to spend [E] to play Gwaihir, but was not allowed" — five Companions on the map, none in the Fellowship.)* | Fully closed — D13's last residual (the discard branch) landed with John's call D. |
+| D13 | "Move any or all Companions/Nazgûl" cards | Move separated Companions / Nazgûl freely, then a conditional effect | **Companion-move cards fully modelled.** *Book of Mazarbul* (fp-str-04) and *Fear! Fire! Foes!* (fp-str-07): the FP moves any/all separated Companions — interactively (pick a Companion, board-click its destination, repeat, or move none) — then if a Companion is in Erebor/Ered Luin (resp. The Shire/Bree) the Dwarves (resp. North) are roused to War (`moveCompanionsCard`, with a not-At-War-guarded rouse checked before AND after the moves). *(This also fixed a real bug: fp-str-04 previously roused the Dwarves UNCONDITIONALLY, skipping the "if a Companion is in Erebor/Ered Luin" check.)* **Nazgûl-reveal cards now fully modelled too.** *Nazgûl Search* (sh-char-09) and *The Nazgûl Strike!* (sh-char-08b): the Shadow moves any or all of the Nazgûl — interactively (pick a Nazgûl group's region, board-click its destination with FLY range, repeat across groups, or move none) — then if at least one Nazgûl shares the Fellowship's region the conditional effect fires: sh-char-09 reveals the Fellowship; sh-char-08b rolls an extra Hunt (`moveNazgulCard`, with the conditional run once in `finalize`). **Both Nazgûl cards are gated ONLY on their printed condition** — "Play if the Fellowship is on step 1 or higher on the Fellowship Track" — plus a Nazgûl existing to move. The reveal/Hunt half is an EFFECT, not a requirement (p.22: effects are "applied to the maximum extent possible"), so the very common play of using either card purely to REPOSITION the Nazgûl is legal. *(Player report 3i1v1v: they were additionally gated on a Nazgûl being able to reach the Fellowship — and, for sh-char-09, on the Fellowship being Hidden — which blocked that play entirely.)* **And sh-char-09's reveal is a real reveal:** it calls `beginReveal`, so the FP must move the figure up to its Progress and the Progress resets to 0 (p.39), exactly like a Hunt reveal — the choice survives because `finalize` runs after the eventTarget resolver clears the card's own pending choice. *(Player report 3k733e: the Fellowship stayed put with its Progress intact.)* `scripts/probe-play-via.mjs`. **sh-char-08b's printed choice is now offered** — "discard one FP Character Event card from the table or roll for the Hunt" raises a real `nazgulStrike` choice for the Shadow whenever both branches are live (no FP Character table card → the Hunt fires directly, so it is never a one-answer question). **Its Hunt is a real Hunt ROLL** — "roll for the Hunt (as if the Free Peoples player had moved the Fellowship)"; Almanac C 11: "a normal Hunt is triggered for all purposes": the Hunt Box dice (max 5) with the usual re-rolls, FP-dice bonus and Flocks of Crebain, a tile only on a success, and an **Eye worth the successes**. No die enters the Hunt Box. It used to draw a tile directly like Orc Patrol, throwing an Eye out *(player report yp4qcv008k4z6k7g)*. `scripts/probe-nazgul-strike.mjs`. **"Any or ALL of the Nazgûl" now means a SUBSET of a stack on every card.** *The Ringwraiths Are Abroad* (sh-char-23) and *The Black Captain Commands* (sh-char-24) build their own target lists and still flew the whole stack, while the Character die and the `moveNazgulCard` cards had long asked "how many?"; the same figures thus obeyed two different rules depending on how you moved them. `nazgulFlyTargets` now fans a Nazgûl group out to one target per count on all four cards (the Witch-king is one figure, so no count). *(Player report 0j1x6h3r: "Played Ringwraiths are Abroad … It didn't let me choose how many of them to move.")* **Each Nazgûl flies once — not each region once.** The cards used to block a whole region after any fly from or into it, so flying the Witch-king out of Mount Gundabad on *The Black Captain Commands* pinned the Nazgûl he left behind, and a stack could not split two ways. `unmovedNazgul` now counts the figures that have not yet flown on this card (the stack minus those that landed there); the map no longer offers a "move them all together" pick for Nazgûl figures, which only Companions can do. `scripts/probe-nazgul-card-fly.mjs`. *(Player report 2m6j6f1z5w07390y.)* **And the Witch-king is a Nazgûl on these two cards as well (p.25).** *Nazgûl Search* and *The Nazgûl Strike!* enumerated plain Nazgûl stacks only, so the one figure they could not move was the Witch-king — even though their own reveal/Hunt clause already checks his region for the Fellowship, and the other two Nazgûl cards have always flown him. He is offered as a pick (once per card, no count — he is one figure) and the play condition counts him, so a board where he is the last Ringwraith standing no longer refuses the card. *(Player report 5vw7t8btxx0r2dq7.)* **And the "or MOVE" branch of the separation cards is modelled.** *Gwaihir the Windlord* (fp-char-15) and *We Prove the Swifter* (fp-char-16) print "Separate from the Fellowship, **or move**, one Companion or one group of Companions" — that second branch used to be waved off as "folded into the Character-die move", which is wrong on three counts: it costs an **Event** die instead of a Character die, it carries the card's range bonus (Level-as-4 / +2 regions), and with an **empty Fellowship it is the only playable branch at all**. `separateViaCard({ mapMove: true })` now offers on-map Companions as picks tagged with their region (`from`); same-region Companions may join the travelling group (range = the highest Level, p.24) and `finalize` routes the `from`-tagged branch through `moveCompanionGroup`. *I Will Go Alone* (fp-char-11) and *There and Back Again* (fp-char-17) print no such clause and stay separate-only. `scripts/probe-companion-card-move.mjs`. *(Player report 4964174f: "T8: Wanted to spend [E] to play Gwaihir, but was not allowed" — five Companions on the map, none in the Fellowship.)* | Fully closed — D13's last residual (the discard branch) landed with John's call D. |
 
 | D15 | Splitting an Army moved by an **Event card** (p.28, "Using an Event Card to Move Armies": "it is possible to split the Army before moving") | The player may define the moving Army as a subset before a card-driven move | **Modelled (RAW).** The `eventTarget` action carries an optional `move` MoveSelection; every card mover (Shadows Gather, The Shadow Lengthens, The Shadow is Moving, Corsairs of Umbar's move branch, Paths of the Woses, Through a Day and a Night, Nazgûl-led moves) passes it to `moveAllUnits`, whose split half (`moveSelectedUnits`) applies a **sanitized** subset: own-side Nations/figures only, clamped to what's present, never Saruman, and a Nazgûl-led split keeps its escort with the movers (≥1 Nazgûl, or the **Witch-king** when the Army qualifies through him alone — forcing a Nazgûl unconditionally asked for a figure that was not in the stack, so a Witch-king-led split marched off and left him behind). The composition rules are a **refusal**, not a silent correction: `cardSplitBlockReason` rejects a selection that moves no unit or that would leave a Free Peoples Leader in a region with no combat units (p.27). Both used to be answered quietly — an empty tick-list moved the WHOLE Army, and a stranding selection dragged the Leaders along regardless — so the player's selection was overruled with no message anywhere *(player report 2w0k3j4k1q026q3r)*. The split picker now asks the same question for a card move that it already asked for a die move, so the refusal is shown before the click, with the same wording. The UI routes card-move picks through the same split picker as normal moves (whole army remains the default). Player report 5i0w4b0 asked for this. `scripts/probe-card-move-split.mjs`. **Residuals:** target enumeration still requires the WHOLE army to fit the destination's stacking limit (a destination only a subset could legally join isn't offered); card ATTACKS take the whole force (no card-attack rearguard); the AI always moves the whole stack (an AI-strength gap, not a rules one). | — closed, with the listed residuals. |
 | D14 | Casualties inflicted by **direct-damage Event cards** (p.30 casualty rule) | The **owner** of the losing units chooses each removal: eliminate 1 Regular **or** reduce 1 Elite to a Regular | **Interactive for the cards resolved in a single `apply` step** — the owner gets a real `eventCasualties` choice (now allocated ONE HIT AT A TIME — see §7 step 4) whenever a genuine choice remains, exactly like combat casualties (`queueOrApplyEventCasualties` / `resolveCasualtyStep`). **Return to Valinor** (sh-str-01, FP Elves), **The Ents Awake** (fp-char-19/20/21, Orthanc — Nazgûl/Minions eliminated with the Army in the follow-up), and **Dreadful Spells** (sh-char-19, FP Army) are covered. **Faramir's Rangers** (fp-str-06) and **The Spirit of Mordor** (fp-str-05) now ask the Shadow too (reports 29395e6o1y6r4y5e, 3i5z6d36724x115m, 2026-10-09): the `eventTarget` resolver hands the raised question over first and, when the card still has targets (Faramir's Osgiliath recruit), queues its own prompt behind it as `thenChoice`. Every chosen casualty is logged ("Shadow casualties: a Sauron Elite is reduced to a Regular"), like the forced ones. **Dead Men of Dunharrow** now asks the Shadow too, then retreats (the Shadow choosing the free region) or is destroyed (`afterEventCasualties`); **Return to Valinor** strikes each Elven Stronghold in turn through the same per-hit prompt, Elven units only (`runEventStrikes`, `nation`) — reports 5a2d6z5y7037406d, 6f4a631y3j0w2x2n, 2026-10-10. **Forced outcomes are not asked** (report 82pv41soao2luug6, `scripts/probe-forced-choices.mjs`, `scripts/probe-casualty-choice.mjs`): hits enough to destroy every unit (one per Regular, two per Elite) are applied without a prompt — taking Elites off with two hits rather than reducing them first, the order that never costs the Free Peoples a reinforcement Regular (**deviation:** the strictly worse order is not offered); "Retreat or stand?" is not asked when no free region exists (the Army stands, logged); a Hunt allocation with exactly one legal number of dice is made for the Shadow (logged); and a Muster with no second figure to place ends without the question. | Closed — every card's casualties are the owner's choice; only forced or strictly dominated allocations resolve themselves. |

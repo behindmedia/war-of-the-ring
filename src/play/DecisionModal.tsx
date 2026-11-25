@@ -13,10 +13,11 @@ import { RollRow, CardRollRows } from './combatDice';
 import { NoticeText } from './NoticePopup';
 import { CardZoom } from './HandStrip';
 import type { GameState, Side, Nation } from '../engine/types';
-import { eliteHasReplacement } from '../engine/combat';
+import { eliteHasReplacement, preCombatRetreatBlocked } from '../engine/combat';
+import { combatModsFor } from '../engine/combatCards';
 import type { WotrAction } from '../adapter/wotrAction';
 import mapData from '../../assets/map.json';
-import { characterSide, nationName } from '../engine/data';
+import { characterSide, nationName, sideOfNation } from '../engine/data';
 import { forceLeadership } from '../engine/armies';
 import { charName, charDef } from './charInfo';
 import { cardSideLine, inNationOrder } from './names';
@@ -58,6 +59,7 @@ const CHOICE_TITLE: Record<string, string> = {
   crebain: 'Flocks of Crebain — discard for +1 to all Hunt dice this roll?',
   bonusDraw: 'The Palantír of Orthanc — draw a card?',
   guideDraw: 'Gandalf the Grey — draw a card?',
+  guideChoice: 'The Fellowship has changed — who is its Guide?',
   freeCharEvent: 'The Ents Awake — play a Character Event card now, without a die?',
   sorcererDraw: 'The Witch-king’s Sorcery — draw a card?',
   lureChoice: 'Lure of the Ring — the Ring tempts a Companion',
@@ -214,8 +216,15 @@ function CombatHeader({ pc, view, onHover }: { pc: NonNullable<GameState['pendin
   // Shadow was attacking itself. Same rule the dice use (engine atkForce/defForce).
   const atkBoxed = pc.boxed === pc.attacker ? view.regions[pc.from]?.siegeBox : undefined;
   const defBoxed = pc.boxed === pc.defender ? view.regions[pc.to]?.siegeBox : undefined;
+  // A defender that has just retreated into the Stronghold stands in the siege box
+  // while the attacker decides whether to advance, before any siege (pc.boxed) exists —
+  // the open field read "Defender: 0 units" (player report 0c8nmk2mx611wj4z).
+  const box = view.regions[pc.to]?.siegeBox;
+  const defWithdrew = !defBoxed && !pc.boxed && box
+    && (Object.keys(box.units) as Nation[]).some((n) => sideOfNation(n) === pc.defender && (box.units[n]!.regular + box.units[n]!.elite) > 0)
+    ? box : undefined;
   const atk = atkBoxed ?? view.regions[pc.from];
-  const def = defBoxed ?? view.regions[pc.to];
+  const def = defBoxed ?? defWithdrew ?? view.regions[pc.to];
   return (
     <div style={{ borderBottom: '1px solid #443', paddingBottom: 8 }}>
       <div style={{ fontSize: 13, color: '#e6b85a', fontVariant: 'small-caps', letterSpacing: 1 }}>
@@ -228,7 +237,7 @@ function CombatHeader({ pc, view, onHover }: { pc: NonNullable<GameState['pendin
       {/* Army sizes — so the player can size up the fight without closing the modal (report). */}
       <div style={{ display: 'flex', gap: 16, marginTop: 6, flexWrap: 'wrap' }}>
         <ArmySize label={atkBoxed ? 'Attacker (sortie, from the Stronghold)' : 'Attacker'} force={atk} side={pc.attacker} view={view} />
-        <ArmySize label={defBoxed ? 'Defender (in siege)' : atkBoxed ? 'Defender (besieging)' : 'Defender'} force={def} side={pc.defender} view={view} />
+        <ArmySize label={defBoxed ? 'Defender (in siege)' : defWithdrew ? 'Defender (retreated into the Stronghold)' : atkBoxed ? 'Defender (besieging)' : 'Defender'} force={def} side={pc.defender} view={view} />
       </div>
       {/* The round's dice, as DICE. This used to be two numbers in small text while
           the end-of-battle popup had the good display — the reporter of
@@ -321,18 +330,22 @@ function PlayedCard({ id, who, side, onHover }: { id: string; who: string; side:
   );
 }
 
-function TileDetail({ tile }: { tile?: { value: number | string; reveal?: boolean; stop?: boolean } }) {
+function TileDetail({ tile }: { tile?: { value: number | string; reveal?: boolean; stop?: boolean; card?: string; introducedBy?: string } }) {
   if (!tile) return null;
-  const dmg = typeof tile.value === 'number' ? `${tile.value} Hunt damage`
+  // A special tile goes by its name, in its own colour (player report 5x6k184c0i623v3j:
+  // Shelob's Lair read "a die — rolled for damage" on a tan tile).
+  const dmg = tile.card ? tile.card
+    : typeof tile.value === 'number' ? `${tile.value} Hunt damage`
     : tile.value === 'eye' ? 'an Eye (Shadow draws Hunt dice for damage)' : 'a die — rolled for damage';
+  const special = tile.introducedBy ? { special: tile.introducedBy.startsWith('fp-') ? 'fp' as const : 'shadow' as const, ...(tile.card ? { specialCard: tile.card } : {}) } : {};
   // The tile itself, drawn like the Hunt popup draws it — not just words (player report
   // 2k4q64023j4j611u: "it should use the Hunt one with the tile displayed graphically").
-  const draw = { seq: 0, damage: typeof tile.value === 'number' ? tile.value : 0, onMordor: false, ...tile, reveal: !!tile.reveal, stop: !!tile.stop } as Draw;
+  const draw = { seq: 0, damage: typeof tile.value === 'number' ? tile.value : 0, onMordor: false, ...tile, ...special, reveal: !!tile.reveal, stop: !!tile.stop } as Draw;
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 12, margin: '6px 0 2px' }}>
       <HuntTileFace draw={draw} />
       <div style={{ fontSize: 13, color: '#e9b' }}>
-        You drew: <b>{dmg}</b>{tile.reveal ? ' · Reveal' : ''}{tile.stop ? ' · Stop' : ''}.<br />Redraw it (Mithril Coat), or keep it?
+        You drew: <b>{dmg}</b>{tile.reveal ? ' · Reveal' : ''}{tile.stop ? ' · Stop' : ''}
       </div>
     </div>
   );
@@ -359,7 +372,7 @@ function RemoveExcessDetail({ view, data }: { view: GameState; data?: { region?:
 // the damage is the tile's value (not the success count) — so the choice isn't
 // made blind to what produced it. A link opens the full "how the Hunt works"
 // dialog with every modifier.
-function HuntDetail({ view, data, onExplain }: { view: GameState; data?: { damage?: number; reveal?: boolean; source?: string; noReduce?: boolean }; onExplain: () => void }) {
+function HuntDetail({ view, data, onExplain }: { view: GameState; data?: { damage?: number; reveal?: boolean; source?: string; noReduce?: boolean; forceRandom?: boolean; casualty?: boolean }; onExplain: () => void }) {
   if (!data) return null;
   const draws = view.hunt.draws ?? [];
   const last = draws.length ? draws[draws.length - 1] : undefined;
@@ -412,6 +425,18 @@ function HuntDetail({ view, data, onExplain }: { view: GameState; data?: { damag
       <div style={{ fontSize: 13, color: '#e9b', margin: '4px 0 0' }}>
         Hunt damage <b>{data.damage ?? '?'}</b>. Choose how the Ring-bearers absorb it.
       </div>
+      {/* Say why the usual options are missing (player report 8x25qmxylu5j32tr: Foul
+          Thing's forced casualty went unexplained, then a second one was offered). */}
+      {data.forceRandom && !data.casualty && (
+        <div style={{ fontSize: 12.5, color: '#cbbf9a', margin: '4px 0 0' }}>
+          Foul Thing from the Deep: a random Companion must fall before the Ring is used. You may reduce the damage first.
+        </div>
+      )}
+      {data.casualty && (
+        <div style={{ fontSize: 12.5, color: '#cbbf9a', margin: '4px 0 0' }}>
+          A Companion has already fallen to this tile — only one may per Hunt, so what is left goes on the Ring unless you reduce it.
+        </div>
+      )}
       {data.reveal && (
         <div style={{ margin: '6px 0 0', padding: '7px 9px', background: '#5a1f1f', border: '1px solid #a83232', borderRadius: 8, fontSize: 12.5, lineHeight: 1.45 }}>
           <RevealedDot /> This tile <b>reveals</b> the Fellowship.
@@ -434,6 +459,11 @@ function eliteLabel(a: WotrAction, view: GameState): string | undefined {
   // Name the Companion the Lure would claim (player report 54406l4k1y6d5f0b).
   const lured = (view.pendingChoice?.data as { companion?: string } | undefined)?.companion;
   if (a.kind === 'lureChoice' && a.mode === 'eliminate' && lured) return `Eliminate ${charName(lured)}`;
+  // Scouts with nowhere to go: still playable (its "Play if" is met), but say what
+  // it will do — nothing (player report ngqb3corp8eecwqf).
+  if (a.kind === 'playCombatCard' && a.cardId && combatModsFor(a.cardId)?.retreatBeforeCombat && preCombatRetreatBlocked(view, owner)) {
+    return `${describeAction(a)} — nowhere to retreat, so it would do nothing`;
+  }
   if (a.kind === 'casualtyStep' && a.step === 'reduceElite' && !eliteHasReplacement(view, a.nation, owner)) {
     return `Lose a ${nationName(a.nation)} Elite (no Regular left to replace it)`;
   }
@@ -459,6 +489,7 @@ function DecisionButton({ action, disabled, onClick, onHover, guide, label }: { 
           separated (player report 2k0h2q5l57145k3y). */}
       {action.kind === 'huntDamage' && action.mode === 'guide' && guide ? `Sacrifice ${charName(guide)}`
         : action.kind === 'huntDamage' && action.mode === 'reduceSeparate' && guide ? `Separate ${charName(guide)} (−1 damage)`
+        : action.kind === 'guideChoice' ? (action.companion === guide ? `Keep ${charName(action.companion)} as the Guide` : `Make ${charName(action.companion)} the Guide`)
         : label ?? describeAction(action)}
     </button>
   );
@@ -477,10 +508,13 @@ const CHOICE_CHARACTER: Record<string, string> = { guideDraw: 'gandalf-grey', so
 function CharacterBlurb({ id }: { id: string }) {
   const d = charDef(id);
   const art = useCardArt(id);
+  // Click to see it full size, like an Event card here (player report 3o5f37150y5c062m).
+  const [zoom, setZoom] = useState(false);
   if (!d) return <CardBlurb id={null} />;
   return (
     <div style={{ ...blurb, display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-      {art && <img src={art} alt="" style={{ height: 120, borderRadius: 4, flexShrink: 0 }} />}
+      {art && <img src={art} alt="" title="Click to enlarge" onClick={() => setZoom(true)} style={{ height: 120, borderRadius: 4, flexShrink: 0, cursor: 'pointer' }} />}
+      {zoom && <CardZoom id={id} onClose={() => setZoom(false)} />}
       <div>
         <div style={{ fontWeight: 700, fontSize: 13 }}>{d.name}{d.title && <span style={{ color: '#aa9', fontWeight: 400, fontStyle: 'italic' }}> · {d.title}</span>}</div>
         <div style={{ fontSize: 12, color: '#d9c98a', margin: '3px 0' }}>Level {d.level === 'inf' ? '∞' : d.level}{d.leadership ? ` · Leadership ${d.leadership}` : ''}</div>
@@ -498,7 +532,7 @@ function CardBlurb({ id }: { id: string | null }) {
   const [zoom, setZoom] = useState(false);
   return (
     <div style={{ ...blurb, display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-      {def && art && <img src={art} alt="" title="Click to enlarge" onClick={() => setZoom(true)} style={{ height: 120, borderRadius: 4, flexShrink: 0, cursor: 'zoom-in' }} />}
+      {def && art && <img src={art} alt="" title="Click to enlarge" onClick={() => setZoom(true)} style={{ height: 120, borderRadius: 4, flexShrink: 0, cursor: 'pointer' }} />}
       {zoom && id && <CardZoom id={id} onClose={() => setZoom(false)} />}
       {def ? (
         <div>

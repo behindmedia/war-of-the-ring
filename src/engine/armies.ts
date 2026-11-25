@@ -101,7 +101,10 @@ export function forceLeadership(state: GameState, f: Force, side: Side): number 
   let l = side === 'fp' ? f.leaders : f.nazgul;
   for (const cid of f.characters) {
     const d = characterDef(cid);
-    if (followOptions.ownSideLeadership && characterSide(cid) !== side) continue;
+    // Only a side's OWN Characters lead its Army. A Companion of no Nation (Gandalf, the
+    // Hobbits, Aragorn) left in a region a Shadow Army then entered used to add his
+    // Leadership to the SHADOW's re-roll, because 'any' Nation was read as the asking side's.
+    if (characterSide(cid) !== side) continue;
     if (d && sideOfNation((d.nation && d.nation !== 'any' ? d.nation : (side === 'fp' ? 'gondor' : 'sauron')) as Nation) === side) {
       l += d.leadership;
     }
@@ -175,11 +178,10 @@ export function recruit(state: GameState, nation: Nation, id: RegionId, regular:
   const pool = state.reinforcements[nation] as { regular: number; elite: number; leader?: number };
   const leader = opts.leader ?? 0;
   if (regular > pool.regular || elite > pool.elite || leader > (pool.leader ?? 0)) return false;
-  // A Muster die respects the limit up front; an Event card recruits in full and the
-  // excess is trimmed by the owner afterwards (p.26, Almanac — see placeUnits).
-  // (While following another rules engine's game, the stacking limit is checked after the action instead:
-  // followOptions.musterOverLimit; rulebook p.26 "at the end of any action (for example, after … mustering)".)
-  if (!opts.ignoreAtWar && !followOptions.musterOverLimit && forceUnitCount(into) + regular + elite > limit) return false;
+  // The stacking limit is checked after the action, for a Muster die as for an Event card:
+  // "If, at the end of any action (for example, after moving or mustering troops), more
+  // than 10 units are in the same region, the excess units must be removed" (p.26). The
+  // adapter's end-of-action sweep (enforceStackingLimit) has the owner pick them.
   // "Free Peoples Leaders can never be in a region without Free Peoples Army units"
   // (p.26). The movement paths enforce this (moveArmySplit, moveSelectedUnits) but
   // the MUSTER path did not, so a Leader could be recruited alone into an empty
@@ -362,6 +364,33 @@ export function cardPathBlockReason(state: GameState, from: RegionId, path: read
     prev = r;
   }
   return null;
+}
+
+/** The next regions a traced card route may step into: open by cardPathBlockReason AND
+ *  still able to END at one of `ends` (the card's offered destinations) within the
+ *  steps left of `budget`. Shadows Gather must stop where another Shadow Army stands;
+ *  offering every walkable neighbour let a player spend all three steps into empty
+ *  country, where the card could neither stop nor go on (player report
+ *  kglsmlh727juow8r — "my game cannot progress"). */
+export function cardRouteNextSteps(state: GameState, from: RegionId, route: readonly RegionId[], ends: readonly RegionId[], budget: number, side: Side, movingNations: readonly Nation[]): Set<RegionId> {
+  const open = (path: RegionId[]) => !cardPathBlockReason(state, from, path, side, movingNations);
+  const canEnd = (path: RegionId[], left: number): boolean => {
+    const head = path[path.length - 1];
+    if (ends.includes(head)) return true;
+    if (left <= 0) return false;
+    return (REGIONS[head]?.adjacency ?? []).some((n) => open([...path, n as RegionId]) && canEnd([...path, n as RegionId], left - 1));
+  };
+  const steps = new Set<RegionId>();
+  if (route.length >= budget) return steps;
+  const head = route.length ? route[route.length - 1] : from;
+  for (const n of REGIONS[head]?.adjacency ?? []) {
+    // A route MAY walk back through a region it has already entered (only ENDING where
+    // it started is barred, and the engine never offers that destination) — barring
+    // revisits made legal detours impossible to trace (player report 306c5v2g003c6332).
+    const path = [...route, n as RegionId];
+    if (open(path) && canEnd(path, budget - path.length)) steps.add(n as RegionId);
+  }
+  return steps;
 }
 
 /** A legal route of at most `maxSteps` from→to, preferring one that ENTERS NO enemy
@@ -997,7 +1026,8 @@ export function captureIfEnemySettlement(state: GameState, id: RegionId, side: S
   state.regions[id]!.control = side;
   if (def.vp > 0) {
     state.victoryPoints[side] += def.vp;
-    log(state, null, 'army', `${sideDoes(side, 'capture')} ${id} (+${def.vp} VP, total ${state.victoryPoints[side]})`);
+    // The track before and after, in the rulebook's words (player report ju2xnzxbx5f5cnr5).
+    log(state, null, 'army', `${sideDoes(side, 'capture')} ${id} (${state.victoryPoints[side] - def.vp} → ${state.victoryPoints[side]} Victory Points)`);
   } else {
     // A Town is worth no VP but its capture is still news: it is what moves the
     // Nation's Political Track in the next line (player report 1x5btcxv7nzjpj4x).
@@ -1026,13 +1056,18 @@ export function liftSiegeIfAbandoned(state: GameState, id: RegionId): void {
     if (u.regular + u.elite > 0) { garrison = sideOfNation(n); break; }
   }
   if (garrison === null) {
-    // No unit is left defending — but Companions, Leaders or Nazgûl may still stand
-    // inside: a card's split move can march every unit out and leave them there.
-    // Deleting the box used to delete THEM with it, still listed as in play but held by
-    // nothing (player report fdx2xl3oo40orw9h: "my Companions in Moria disappeared").
-    // They step out into the region, like the Characters of a garrison a card wipes out
-    // (siegeFall), and with no unit left defending it the Stronghold falls to the Army
-    // around it (p.32).
+    // No unit is left defending, but Companions, Leaders or Nazgûl may still stand
+    // inside. Only one card marches units OUT of a siege box: Paths of the Woses ("from
+    // any one Rohan region, including a Stronghold under siege"), and its split move can
+    // take every unit and leave figures behind. Every other card move starts from an
+    // open-field Army (armySide), and Dead Men of Dunharrow takes Companions only, so
+    // the units stay. A box emptied by casualties never reaches here: combat and the
+    // card strikes (finishEventStrike, siegeFall) clear it themselves. So this branch is
+    // the Woses split, plus the sweepAbandonedSieges safety net.
+    // The figures step out into the region, as when a card wipes a garrison out
+    // (siegeFall), and with no unit left defending, the Stronghold falls to the Army
+    // around it (p.32). The capture line reports that; like siegeFall, nothing is said
+    // about the figures who step out (player report 2v1p6a0e69733u38).
     const box = r.siegeBox;
     const figures = box.characters.length + box.leaders + box.nazgul > 0;
     if (figures) mergeForceInto(state, id, box);
@@ -1040,7 +1075,6 @@ export function liftSiegeIfAbandoned(state: GameState, id: RegionId): void {
     if (figures) {
       const field = armySide(state, id);
       if (field) captureIfEnemySettlement(state, id, field);
-      log(state, null, 'combat', `no unit is left defending ${REGIONS[id]!.name ?? id} — the figures inside step out into the region`);
     }
     return;
   }

@@ -5,6 +5,8 @@
 import { useState } from 'react';
 import type { GameState, Side, DieFace } from '../engine/types';
 import { poolSize } from '../engine/dice';
+import type { WotrAction } from '../adapter/wotrAction';
+import { ElvenRings } from './StatusBar';
 
 export const FACE: Record<string, { label: string; bg: string }> = {
   character: { label: 'Char', bg: '#3a6ea5' },
@@ -55,7 +57,9 @@ function Pool({ title, dice, used, mine, selectedDie, onSelectDie, toRoll, inAct
         {clickable && <span style={{ color: '#cb8', marginLeft: 6 }}>{selectedDie ? '· click again to show all' : '· click a die to see its actions'}</span>}
         {spentAt >= 0 && <span style={{ color: '#cb8', marginLeft: 6 }}>· finishing this Action</span>}
       </div>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+      {/* At least one die's height, so "none yet" holds the row the dice will fill
+          (player report 4e1w466p1k400s36). */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, minHeight: 26, alignItems: 'center' }}>
         {dice.length === 0 && used.length === 0 && <span style={{ color: '#776', fontSize: 12, fontStyle: 'italic' }}>none yet</span>}
         {dice.map((d, i) => clickable
           ? <Chip key={`u${i}`} face={d} selected={i === glowAt} onClick={() => { setPicked(i); onSelectDie!(i === glowAt ? null : d); }} />
@@ -66,7 +70,9 @@ function Pool({ title, dice, used, mine, selectedDie, onSelectDie, toRoll, inAct
   );
 }
 
-export function DiceTray({ view, you, selectedDie, onSelectDie, inActionDie, only }: { view: GameState; you: Side | null; selectedDie?: DieFace | null; onSelectDie?: (f: DieFace | null) => void;
+export function DiceTray({ view, you, selectedDie, onSelectDie, inActionDie, only, ringActions, onAction }: { view: GameState; you: Side | null; selectedDie?: DieFace | null; onSelectDie?: (f: DieFace | null) => void;
+  /** Your Elven Ring uses, offered behind your Rings (beside your dice). */
+  ringActions?: WotrAction[]; onAction?: (a: WotrAction) => void;
   /** The die spent on your Action that is still being resolved. */
   inActionDie?: DieFace | null;
   /** One pool alone: the opponent's sits with their hand above the actions, yours with
@@ -91,8 +97,13 @@ export function DiceTray({ view, you, selectedDie, onSelectDie, inActionDie, onl
   };
   return (
     <div style={only ? { ...panel, borderBottom: 'none' } : panel}>
-      {only !== 'opp' && <Pool title={`Your dice (${name(me)})`} dice={view.dice[me]} used={used[me]} mine selectedDie={selectedDie} onSelectDie={onSelectDie} toRoll={toRoll(me)} inAction={inActionDie} />}
+      {/* Each side's Elven Rings sit with its dice, above them — Rings, then the
+          pool's heading, then the dice — the same order for both sides (player
+          reports 3f0y4s3x0z1a4b3n, 5x0k142a1p6x155o). */}
+      {only !== 'mine' && <div style={{ marginBottom: 6 }}><ElvenRings view={view} side={opp} /></div>}
       {only !== 'mine' && <Pool title={`${name(opp)} dice`} dice={view.dice[opp]} used={used[opp]} mine={false} toRoll={toRoll(opp)} />}
+      {only !== 'opp' && <div style={{ marginBottom: 6 }}><ElvenRings view={view} side={me} actions={ringActions} onAction={onAction} dropUp /></div>}
+      {only !== 'opp' && <Pool title={`Your dice (${name(me)})`} dice={view.dice[me]} used={used[me]} mine selectedDie={selectedDie} onSelectDie={onSelectDie} toRoll={toRoll(me)} inAction={inActionDie} />}
     </div>
   );
 }

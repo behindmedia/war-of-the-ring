@@ -44,6 +44,7 @@ export function eliminateCompanion(state: GameState, id: CharacterId): number {
     state.characters.eliminated.push(id);
   }
   reassignGuide(state);
+  state.flags.guideChoiceOwed = true;
   pruneFellowshipOnTableCards(state);
   return lvl;
 }
@@ -61,7 +62,7 @@ export function eligibleGuides(state: GameState): CharacterId[] {
 export function setGuide(state: GameState, id: CharacterId): boolean {
   if (!eligibleGuides(state).includes(id)) return false;
   state.fellowship.guide = id;
-  log(state, null, 'fellowship', `${id} becomes the Guide`);
+  log(state, null, 'fellowship', `${COMPANIONS[id]?.name ?? id} becomes the Guide`);
   return true;
 }
 
@@ -83,6 +84,21 @@ export function resolveLureChoice(state: GameState, mode: 'corruption' | 'elimin
 }
 
 export const MORDOR_ENTRANCES: RegionId[] = ['morannon', 'minas-morgul'];
+
+/** Does the Free Peoples player have anything to decide in the Fellowship phase?
+ *  Mirrors the phase's legal actions (wotrAdapter): declare (hidden, off the Mordor
+ *  Track, not yet this turn), enter Mordor (at an entrance), or name another Guide
+ *  (a Level tie). With none of these the only action is to end the phase, so the
+ *  engine ends it (phases.ts) — typical on the Mordor Track (player report
+ *  aihekly5hgvi5czw). Everything read here is public, so the skip tells nobody anything. */
+export function fellowshipPhaseHasChoice(state: GameState): boolean {
+  const fs = state.fellowship;
+  if (fs.mordor === null) {
+    if (fs.hidden && !state.flags.fellowshipDeclaredThisTurn) return true;
+    if (MORDOR_ENTRANCES.includes(fs.location)) return true;
+  }
+  return eligibleGuides(state).some((c) => c !== fs.guide);
+}
 
 // Gorgoroth, Barad-dûr and Nurn are ORDINARY REGIONS for the Ring-bearers' figure.
 // We used to bar the figure from all three, on the theory that a figure inside Mordor
@@ -484,6 +500,7 @@ export function beginSeparation(state: GameState, id: CharacterId): boolean {
   if (fs.sepGuide === undefined) fs.sepGuide = fs.guide; // the Guide before this group left
   fs.companions.splice(fs.companions.indexOf(id), 1);
   reassignGuide(state);
+  state.flags.guideChoiceOwed = true;
   return true;
 }
 
@@ -504,7 +521,8 @@ function sepGuideNote(state: GameState): string {
  *  the Corruption healing takes effect)"; Gwaihir likewise ("sometimes done to bring
  *  Gollum into play for his Guide abilities"). The card was refused outright instead
  *  (player report). Not a casualty — no Hunt damage is absorbed and Worn with Sorrow
- *  does not fire. Returns whether the Companion was removed. */
+ *  does not fire, so the log line avoids "falls"/casualty wording (report
+ *  4v0d5l074c1e2465). Returns whether the Companion was removed. */
 export function removeCompanionOnMordorTrack(state: GameState, id: CharacterId): boolean {
   const fs = state.fellowship;
   if (fs.mordor === null || !fs.companions.includes(id)) return false;
@@ -512,7 +530,8 @@ export function removeCompanionOnMordorTrack(state: GameState, id: CharacterId):
   if (!state.characters.eliminated.includes(id)) state.characters.eliminated.push(id);
   const oldGuide = fs.guide;
   reassignGuide(state);
-  log(state, null, 'fellowship', `${COMPANIONS[id]?.name ?? id} leaves the Fellowship on the Mordor Track and is removed from play`
+  state.flags.guideChoiceOwed = true;
+  log(state, null, 'fellowship', `${COMPANIONS[id]?.name ?? id} separates from the Fellowship and vanishes into the wastes of Mordor`
     + (fs.guide !== oldGuide ? ` — ${COMPANIONS[fs.guide]?.name ?? fs.guide} becomes the Guide` : ''));
   return true;
 }

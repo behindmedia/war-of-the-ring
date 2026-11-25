@@ -16,9 +16,9 @@ import type { Rng } from 'digital-boardgame-framework';
 import { REGIONS, levelOf, characterDef, sideOfNation, characterSide } from '../engine/data';
 import { unitCount, forceUnitCount, forceLeadership, STACKING_LIMIT, splitBlockReason, fellowshipRegion, armySide, ownNationsIn, type Force } from '../engine/armies';
 import { sortieForce, heroicDeathForce } from '../engine/combat';
-import { MORDOR_ENTRANCES, separationActivates } from '../engine/fellowship';
+import { MORDOR_ENTRANCES, separationActivates, separationDestinations, separationRange } from '../engine/fellowship';
 import { characterDestinations } from '../engine/charMove';
-import { cardSplitBlockReason, dreadfulSpellsBestDice } from '../engine/handlers/index';
+import { cardSplitBlockReason, dreadfulSpellsBestDice, stormcrowNations } from '../engine/handlers/index';
 import { combatModsFor, type CombatMods } from '../engine/combatCards';
 import { SH_FORCE_DISCARD_UNLOCKS } from '../engine/persistent';
 
@@ -58,6 +58,26 @@ function revealHitsShadowStronghold(state: GameState): boolean {
   return (['moria', 'minas-morgul', 'morannon'] as RegionId[]).some((x) => settlementCtrl(state, x) === 'shadow'
     && dist(fs.location, x) <= fs.progress && dist(fs.location, x) + dist(x, exit) === dist(fs.location, exit));
 }
+const SPECIAL_TILE_CARDS = new Set(['sh-char-01', 'sh-char-02', 'sh-char-03', 'sh-char-04']); // Shelob's Lair, The Ring is Mine!, On, On They Went, Give it to Uss!
+const FP_NATIONS_AI: Nation[] = ['dwarves', 'elves', 'gondor', 'north', 'rohan'];
+/** The Free Peoples still hold a die that could advance a passive Nation by Muster. */
+function fpCanMusterPassive(state: GameState): boolean {
+  if (FP_NATIONS_AI.every((n) => state.nations[n].active)) return false;
+  return state.dice.fp.some((d) => d === 'muster' || d === 'armyMuster' || d === 'will');
+}
+/** The Free Peoples still hold a die that moves the Fellowship this turn. */
+function fpCanStillMoveFellowship(state: GameState): boolean {
+  return state.dice.fp.some((d) => d === 'character' || d === 'will');
+}
+/** Some region next to the Fellowship is farther from Mordor than where it stands. */
+function cruelWeatherSetsBack(state: GameState): boolean {
+  const loc = state.fellowship.location;
+  return (REGIONS[loc]!.adjacency as RegionId[]).some((r) => toMordor(r) > toMordor(loc));
+}
+/** After paying for a Character card now, the Shadow still holds a die that can play one. */
+function shadowKeepsCardDie(state: GameState): boolean {
+  return state.dice.shadow.filter((d) => d === 'event' || d === 'character').length >= 2;
+}
 const SHADOW_CHARS = new Set(['witch-king', 'saruman', 'mouth-of-sauron']); // the rest are FP Companions
 
 export function chooseAction(state: GameState, actor: Side, legal: WotrAction[], rng: Rng): WotrAction {
@@ -66,44 +86,42 @@ export function chooseAction(state: GameState, actor: Side, legal: WotrAction[],
   // --- pending choices (combat / hunt) ---
   if (state.pendingChoice) return resolveChoice(state, legal);
 
-  // --- hunt allocation (Shadow): ALL-OR-NOTHING. Max the Hunt Box once the Ring is
-  //     the live threat (Mordor Track), otherwise spend nothing and keep the dice
-  //     for actions. Every intermediate setting measured worse — see below. ---
+  // --- hunt allocation (Shadow): two dice every turn before Mordor, the Hunt Box maxed
+  //     on the Mordor Track. ---
   if (state.phase === 'huntAllocation') {
     const opts = legal.filter((a) => a.kind === 'allocateHunt') as Extract<WotrAction, { kind: 'allocateHunt' }>[];
     if (!opts.length) return legal[0]!;
     const lo = Math.min(...opts.map((a) => a.dice)), hi = Math.max(...opts.map((a) => a.dice));
-    // Hunt dice ARE Action dice — the exchange rate decides everything, and it is
-    // brutal pre-Mordor: measured self-play (300g) a flat 2-per-turn baseline gave
-    // Shadow 105/300 vs 143/300 for spending nothing. The Shadow's edge is board
-    // tempo (muster/march/attack), not speculative Hunt rolls at low dice counts.
-    //
-    // NB the old heuristic scaled with fs.progress — that signal is near-useless
-    // here. Allocation happens in phase 3, right after the FP's phase-2 declare
-    // RESETS progress, and progress only accrues from phase-5 moves. Instrumented
-    // over 60 games: progress was 0 in 864 of 1137 allocations, 1 in 272, and >=2
-    // exactly ONCE — so the escalation rungs were dead code and the Shadow drifted
-    // through the game at ~0.69 dice.
     const fs = state.fellowship;
-    // HUNT THE APPROACH (shipped 2026-09-10, the first change measured on both
-    // gates — docs/ai-humanlike-yardstick.md). Humans reach Mordor at turn 7 with
-    // ~3 Corruption because nothing is rolled against them on the road; a flat
-    // 2/turn everywhere measured badly (dice thrown at a Fellowship that is resting
-    // or far away). This spends 2 only while the Fellowship is hidden, on the road
-    // (not in a haven where it could heal instead) and within six regions of the
-    // Morannon — the stretch where a hit is hard to walk off. Measured, 2000 games
-    // x 2 families: vs the heuristic FP Shadow 543->606 and 597->673; vs the
-    // human-like yardstick 640->737 and 689->731; corruption wins up in all four.
-    const approach = fs.mordor === null && fs.progress < 4 && fs.hidden
-      && !isHealSettlement(state, fs.location) && dist(fs.location, 'morannon') <= 6;
+    // FLAT TWO before Mordor (2026-10-29, reports 5i1q2c330h0z1367 / 2h56386u064a365t:
+    // "if it's good to place more dice in the Hunt box, then presumably it would
+    // *always* be good"). It was. The rule it replaced spent 2 only while the hidden
+    // Fellowship was on the road within six regions of the Morannon at Progress < 4,
+    // and 3 at Progress 4+ — and the Progress rungs never changed a game (dropping
+    // them replayed the base games exactly). Measured, 2000 games x 2 families,
+    // Shadow wins:
+    //   vs the heuristic FP  500 / 530 -> 720 / 729
+    //   vs the human-like FP 744 / 795 -> 900 / 887
+    // Corruption wins carry it (heuristic 483 -> 694). Also measured: the old rule
+    // plus Moria's road (a reveal through a Shadow-held Moria, as the report suggested)
+    // — 692 / 659, 834 / 880: better than the old rule, short of a flat two.
+    // The old note here ("a flat 2-per-turn baseline gave Shadow 105/300 vs 143/300
+    // for spending nothing") was a 300-game self-play test of a far weaker AI; it no
+    // longer held.
     // Off the Track only the first success of a Hunt roll counts (Eyes aside), so past
     // three dice the returns collapse (report 4d4w4o4f2h310z5l: 5 dice before Mordor).
-    const raw = fs.mordor !== null ? hi : fs.progress >= 4 ? Math.min(hi, 3) : approach ? 2 : 0;
+    const raw = fs.mordor !== null ? hi : 2;
     // On the Mordor Track the Ring is the clock, so max out — but only to what a
     // roll can USE. A Hunt roll rolls `Math.min(5, hunt.box)` dice (hunt.ts), so a
     // 6th/7th die is STRICTLY wasted: it cannot help the Hunt, it only disarms us
     // (player report: the AI dumped SEVEN and nearly had no actions). Holding back
     // BELOW 5 in Mordor was also measured and it loses — the Ring gets through.
+    // Re-measured 2026-11-23 against today's AI, because the tournament leader (Normal)
+    // puts ONE die in on the Mordor Track and 1-2 before it. 2000 games x 2 families,
+    // Shadow wins (base 826 / 801 heuristic FP, 1111 / 1093 human-like):
+    //   1 die in Mordor    760 / 752, 1072 / 1041 (z -2.4 to -4.5)
+    //   1 die before it    706 / 702, 1024 / 1026 (z -2.2 to -4.2)
+    // Both lose for our Shadow; the flat two and the Mordor max stand.
     const HUNT_ROLL_CAP = 5;
     const target = Math.min(raw, HUNT_ROLL_CAP);
     const want = Math.max(lo, Math.min(hi, target));
@@ -137,6 +155,19 @@ export function chooseAction(state: GameState, actor: Side, legal: WotrAction[],
     // AND keep the most ground). Analysis: the FP AI was losing the corruption race
     // even vs a random Shadow because it never healed — it just rushed to Mordor.
     const declares = legal.filter((a): a is Extract<WotrAction, { kind: 'declareFellowship' }> => a.kind === 'declareFellowship');
+    // REJECTED 2026-10-27 (player report 5i1q2c330h0z1367: drop the Progress-keyed
+    // rules below and declare from first principles). Both proposed replacements were
+    // built — each counting the Hunt re-roll sources at the target (Shadow Stronghold,
+    // Shadow Army, Nazgûl), keeping the declare at a Mordor entrance and past a
+    // Shadow-held Moria — and A/B'd as FP wins vs the heuristic Shadow, 2000 games
+    // per family (base 1500 / 1470):
+    //   A, sparing: declare only to FEWER re-roll sources, or to heal in place:
+    //     1459 / 1417 (-41 / -53)
+    //   B, greedy: the target nearest Mordor with no MORE sources, never leaving an
+    //     FP settlement for open ground at equal sources: 1436 / 1425 (-64 / -45)
+    // Both lose on Corruption (Shadow corruption wins 483/511 -> 515-570): the
+    // Progress rules time the declare to the Hunt pool, which a re-roll count alone
+    // cannot see. Keep them until a tested replacement wins.
     // Nearest to the Morannon wins; a TIE goes to the target farther from the
     // Shadow's pieces (Armies, Nazgûl, Shadow-held Strongholds — where the Hunt's
     // re-rolls and the next turn's pounce come from), then to one adjacent to a
@@ -229,6 +260,11 @@ export function chooseAction(state: GameState, actor: Side, legal: WotrAction[],
     // are ones the heuristic Shadow barely exploits, so self-play cannot price them; a
     // human Shadow may. (A suspected cause, the HEAL plan reading a figure left in
     // Rivendell as "resting", was tested too: gating HEAL on Progress < 2 changed no game.)
+    // The 4 and the 3 swept 2026-10-29 (report 1i3j6q042e515x3i: "where is that '4'
+    // magic number coming from?"), FP wins vs the heuristic Shadow, base 1500 / 1470:
+    //   Progress >= 3: 1497 / 1468 (flat)   Progress >= 5: 1477 / 1448 (-45)
+    //   a gain of 2 regions instead of 3: the base games exactly (never decides one)
+    // A broad optimum, not a tuned edge: Progress 3 or 4 alike, waiting for 5 loses.
     if (state.fellowship.progress >= 4) {
       const here = toMordor(state.fellowship.location);
       const gains = declares.filter((a) => noRerolls(a.target) && here - toMordor(a.target) >= 3);
@@ -244,7 +280,35 @@ export function chooseAction(state: GameState, actor: Side, legal: WotrAction[],
     const s = score(state, actor, a, target) + rng.next() * 0.5; // tiny noise for tie-breaks
     if (s > bestScore) { bestScore = s; best = a; }
   }
-  return oneWraith(state, actor, payWithEventDie(state, actor, maybeAttackRearguard(state, actor, maybeFitStack(state, actor, maybeSplitGarrison(state, actor, best))))); // hold a threatened origin; don't overstack
+  return refinePick(state, actor, best);
+}
+
+/** The refinements every picked action goes through: hold a threatened origin, don't
+ *  overstack, keep a rearguard, pay with an Event die, send one Wraith. */
+function refinePick(state: GameState, actor: Side, a: WotrAction): WotrAction {
+  return oneWraith(state, actor, payWithEventDie(state, actor, maybeAttackRearguard(state, actor, maybeFitStack(state, actor, maybeSplitGarrison(state, actor, a)))));
+}
+
+/** The search's candidate list (src/ai/search.ts): for an action-resolution decision,
+ *  the `k` best-scored actions, each refined exactly as `chooseAction` refines its
+ *  pick, best first, with `chooseAction`'s own pick always first. Null when the
+ *  decision is not one `score` ranks (a pending choice, the Hunt allocation, the
+ *  Fellowship phase): the search leaves those to the heuristic. */
+export function topCandidates(state: GameState, actor: Side, legal: WotrAction[], rng: Rng, k: number): WotrAction[] | null {
+  if (legal.length <= 1 || state.pendingChoice || state.phase === 'huntAllocation' || state.phase === 'fellowship') return null;
+  const target = campaignTarget(state, actor);
+  const scored = legal.map((a) => ({ a, s: score(state, actor, a, target) + rng.next() * 0.5 }));
+  scored.sort((x, y) => y.s - x.s);
+  const out: WotrAction[] = [];
+  const seen = new Set<string>();
+  for (const { a } of scored) {
+    if (out.length >= k) break;
+    const r = refinePick(state, actor, a);
+    const key = JSON.stringify(r);
+    if (seen.has(key)) continue;
+    seen.add(key); out.push(r);
+  }
+  return out;
 }
 
 /** Is `from` a VP Settlement of ours that a departing Army must not simply abandon?
@@ -277,13 +341,24 @@ function garrisonWorthy(state: GameState, actor: Side, from: RegionId): boolean 
  *  region? One there gives every Hunt roll its re-roll, hidden or not. Seen in a probe
  *  for report 4w6d6l484k5v0f5d: the pressing Nazgûl flew home to Minas Morgul. */
 function unpressesFellowship(state: GameState, a: Extract<WotrAction, { kind: 'moveCharacter' }>): boolean {
-  const fs = state.fellowship;
-  if (fs.mordor !== null || MORDOR_ENTRANCES.includes(fs.location) || a.from !== fellowshipRegion(state)) return false;
+  if (!pressPays(state) || a.from !== fellowshipRegion(state)) return false;
   const src = state.regions[a.from]!;
   const wk = src.characters.includes('witch-king');
   if (a.char === 'nazgul') return !wk && src.nazgul - (a.count ?? src.nazgul) <= 0;
   if (a.char === 'witch-king') return src.nazgul === 0;
   return false;
+}
+
+/** Does a Nazgûl in the Fellowship's region still buy a Hunt re-roll? Not on the Mordor
+ *  Track (it is in no region), not at an entrance (it enters Mordor next), and not once
+ *  an entrance is within the Progress the hidden Fellowship has banked: it declares there
+ *  next Fellowship phase and goes in without moving through the region again — the Free
+ *  Peoples AI makes the same call (score → 'moveFellowship'). Report a0n0nqq2ahfk33c2: a
+ *  Nazgûl flew to South Ithilien, Progress 1, one region from Minas Morgul. */
+function pressPays(state: GameState): boolean {
+  const fs = state.fellowship;
+  if (fs.mordor !== null || MORDOR_ENTRANCES.includes(fs.location)) return false;
+  return !(fs.hidden && toMordor(fs.location) <= fs.progress);
 }
 
 /** Pressing the Fellowship, hidden or not, takes ONE Nazgûl: the Hunt re-roll is presence-gated,
@@ -309,20 +384,33 @@ function oneWraith(state: GameState, actor: Side, action: WotrAction): WotrActio
 //  card later in the turn. So the Free Peoples keep the engine's icon-die-first payment.
 function payWithEventDie(state: GameState, actor: Side, action: WotrAction): WotrAction {
   if (actor !== 'shadow' || action.kind !== 'playEvent' || action.die || action.cardId === 'fp-char-13') return action;
+  // The Palantír of Orthanc itself goes down with a Character die when one is free: it
+  // draws a card for every later play with an Event die, so that die is worth keeping
+  // for the turn it first pays off (report bxa5j7lysb5l9c80).
+  if (action.cardId === 'sh-char-21' && state.dice[actor].includes('character')) return { ...action, die: 'character' };
   return state.dice[actor].includes('event') ? { ...action, die: 'event' } : action;
 }
+
+// NOT shipped, 2026-11-04 (report azuww06qg8zqnk1l): a Shadow attack led by a Leader paid
+// with a Character die whenever an Army die is also in hand, keeping the Army die for
+// marching. Shadow wins against e9e3f7b: heuristic 721 / 715 vs 730 / 727 (measured at
+// cfde5fe), human-like 1063 / 1066 vs 1093 / 1066 — slightly down both times.
 
 /** A Shadow whole-Army move that would overstack the destination moves only what fits
  *  (Elites first; the Nazgûl and Minions go along) — anything past the limit is removed
  *  on arrival, and the AI was throwing away whole Armies' worth of Regulars marching
  *  into a full Helm's Deep or Minas Tirith (report 3t5w710l563l4s4t). Shadow only. */
 function maybeFitStack(state: GameState, actor: Side, action: WotrAction): WotrAction {
-  if (actor !== 'shadow' || (action.kind !== 'moveArmy' && action.kind !== 'armyMove2') || action.move) return action;
+  if (actor !== 'shadow' || (action.kind !== 'moveArmy' && action.kind !== 'armyMove2')) return action;
   const from = action.from, to = action.to;
   if (!from || !to) return action;
   const r = state.regions[from]!;
-  const mineN = (Object.keys(r.units) as Nation[]).filter((n) => sideOfNation(n) === 'shadow' && (r.units[n]!.regular + r.units[n]!.elite) > 0);
-  const moving = mineN.reduce((t, n) => t + r.units[n]!.regular + r.units[n]!.elite, 0);
+  // A split already chosen (maybeSplitGarrison leaves a garrison behind) is trimmed
+  // too: it skipped this step and marched 9 units onto 5 (probe-ai-1023).
+  const chosen = action.move?.units;
+  const avail = (n: Nation, kind: 'regular' | 'elite'): number => (chosen ? (chosen[n]?.[kind] ?? 0) : r.units[n]![kind]);
+  const mineN = (Object.keys(r.units) as Nation[]).filter((n) => sideOfNation(n) === 'shadow' && (avail(n, 'regular') + avail(n, 'elite')) > 0);
+  const moving = mineN.reduce((t, n) => t + avail(n, 'regular') + avail(n, 'elite'), 0);
   const there = unitCount(state, to);
   if (moving + there <= STACKING_LIMIT) return action;
   let room = STACKING_LIMIT - there;
@@ -330,15 +418,16 @@ function maybeFitStack(state: GameState, actor: Side, action: WotrAction): WotrA
   const units: NonNullable<MoveSel['units']> = {};
   for (const kind of ['elite', 'regular'] as const) {
     for (const n of mineN) {
-      const take = Math.min(room, r.units[n]![kind]);
+      const take = Math.min(room, avail(n, kind));
       if (take <= 0) continue;
       units[n] = { ...units[n], [kind]: take };
       room -= take;
     }
   }
   const move: MoveSel = { units };
-  if (r.nazgul) move.nazgul = r.nazgul;
-  const chars = r.characters.filter((c) => SHADOW_CHARS.has(c) && c !== 'saruman');
+  const naz = action.move ? (action.move.nazgul ?? 0) : r.nazgul;
+  if (naz) move.nazgul = naz;
+  const chars = action.move ? (action.move.characters ?? []) : r.characters.filter((c) => SHADOW_CHARS.has(c) && c !== 'saruman');
   if (chars.length) move.characters = chars;
   // A Character die pays when no Army-type die is left (the second move rides the
   // first move's die); the engine's own validator decides, At-War borders included.
@@ -571,6 +660,11 @@ function garrisonGap(state: GameState, id: RegionId, actor: Side, reach = 2): nu
   // Army, was its only road).
   if (n === 0) return enemyNearOpen(state, id, enemy, actor, reach) ? 1 : 0;
   if (n > 1) return 0;
+  return loneDefenderGap(state, id, actor);
+}
+/** A lone defender beside an enemy Army of 3+ that can storm it is half a gap. */
+function loneDefenderGap(state: GameState, id: RegionId, actor: Side): number {
+  const enemy: Side = actor === 'fp' ? 'shadow' : 'fp';
   const stormer = (REGIONS[id]!.adjacency ?? []).some((a) => armyThreatens(state, a, enemy, id, true) && unitCount(state, a) >= 3);
   return stormer ? 0.5 : 0;
 }
@@ -698,7 +792,11 @@ function wakePrice(state: GameState, actor: Side, id: RegionId, attacking = fals
     const ns = state.nations[n];
     if (!ns || ns.step === 0) return 0;
     const p = state.reinforcements[n];
-    return ((p?.regular ?? 0) + (p?.elite ?? 0) + (p?.leader ?? 0)) / ns.step;
+    // An ACTIVE Nation goes to War on the Free Peoples' own dice, one Muster die a step;
+    // the attack only spares them that die. A passive one cannot leave step 1 without
+    // being woken, so waking it costs the whole pool (report 63hl89a35stuc7as: the
+    // Orthanc Army threw its die away rather than attack Fords of Isen).
+    return ((p?.regular ?? 0) + (p?.elite ?? 0) + (p?.leader ?? 0)) / ns.step * (ns.active ? 0.25 : 1);
   };
   const woken = new Set<Nation>();
   const def = REGIONS[id];
@@ -860,6 +958,9 @@ function score(state: GameState, actor: Side, a: WotrAction, target: RegionId | 
       // Fellowship phase declares there and goes in, so another move is a Hunt roll for
       // ground it does not need (report 4v503t4g6f496w49: Progress 1 in Dagorlad).
       if (fs.hidden && toMordor(fs.location) <= fs.progress) return 1;
+      // NOT shipped, 2026-11-07 (report uakpnuvmgalut9f7): the same hold once the Progress
+      // banked reaches past a Shadow-held Moria. Flat alone (FP wins 1267 / 1260 vs 1270 /
+      // 1273), and part of a Free Peoples set that lost ~130 per 4000 together.
       // Pre-Mordor each move triggers a Hunt, so the push eases as Corruption climbs
       // and leans on declare-to-heal to bring it back down. But the old curve
       // (72 - 9x, floor 8) fell off a cliff: by Corruption 5 the Fellowship move lost
@@ -940,7 +1041,13 @@ function score(state: GameState, actor: Side, a: WotrAction, target: RegionId | 
       // possible moment (player report).
       // …and on the doorstep too, once an entrance is within the Progress banked.
       if (fs.mordor !== null || MORDOR_ENTRANCES.includes(fs.location) || (fs.hidden && toMordor(fs.location) <= fs.progress)) return 1;
-      return passiveFp && fs.corruption < 6 ? 40 : 12;
+      // Only to WAKE a Nation: a Companion who can reach a passive Free Peoples City or
+      // Stronghold he would rouse. Otherwise separating spends a die and a body the
+      // Fellowship still needs (report 3v0c235u2k271235: Merry and Pippin sent to Lórien,
+      // the Elves already active, on a Will of the West).
+      const rouses = passiveFp && separationDestinations(state, fs.location, separationRange(state, a.companion as never))
+        .some((r) => separationActivates(state, a.companion as never, r));
+      return rouses && fs.corruption < 6 ? 40 : 2;
     }
     case 'attack': {
       // SORTIE (p.32): we're the boxed garrison attacking the besiegers, so from === to
@@ -995,7 +1102,13 @@ function score(state: GameState, actor: Side, a: WotrAction, target: RegionId | 
       // 1q112f1z0d6x262j). But the first Minion in play is what lets Gandalf the White
       // come — so while the Free Peoples hold an unused Will of the West and the White
       // could come this turn, hold him back (he waits for their last die).
-      if (a.minion === 'saruman') v += whiteCouldAnswerSaruman(state) ? -30 : 25;
+      // Held back firmly, not just discounted: at −30 he still came whenever nothing else
+      // scored higher (report k90pu3ftiq97aevx).
+      if (a.minion === 'saruman') v += whiteCouldAnswerSaruman(state) ? -60 : 25;
+      // The Witch-king and the Mouth of Sauron are Leaders: they belong with an Army
+      // (report 2jgxdumh7qp76nzf: the Mouth arrived in an empty Dol Guldur while two
+      // Regulars stood in Minas Morgul).
+      if (a.minion !== 'saruman') v += armyHere(state, a.region, 'shadow') ? Math.min(8, unitCount(state, a.region)) : -12;
       return v;
     }
     case 'recruitUnit': return recruitScore(state, actor, a, target); // build the war stacks WHERE THEY MATTER
@@ -1009,11 +1122,28 @@ function score(state: GameState, actor: Side, a: WotrAction, target: RegionId | 
       // Isengard Settlement) against two, or two Orthanc Regulars made Elites — each a
       // Leader too while Saruman stands (reports 504m0n0r2o0m4h4w, 5i2d2w166c672j1p:
       // the Shadow kept mustering in North Dunland and Orthanc instead).
-      if (a.mode !== 'recruit') return (state.regions['orthanc']!.units.isengard?.regular ?? 0) >= 2 ? 62 : 30;
+      // Priced by what it actually yields: with a single Elite left in the pool the
+      // upgrade promotes ONE Regular, and with a single Regular left the recruit places
+      // ONE — both worse than a plain muster of an Elite (reports 290o72523h2w0o0g,
+      // 2w4n2f1y1y4o5j59).
+      // HALF WEIGHT (2026-11-23). The tournament leader (Normal) almost never uses the
+      // Voice: in 2,973 decisions where it was on offer it plain-recruited instead, mostly
+      // an Elite in Orthanc. Measured, 2000 games x 2 families, Shadow wins:
+      //   vs the heuristic FP  826 / 801 -> 847 / 867
+      //   vs the human-like FP 1111 / 1093 -> 1134 / 1121   (+138 of 8000, up in all four)
+      // Never using it scored +131 but dipped once (human-like f1 -3). Against CWOTR
+      // (local, 90 Shadow games) it was neutral: 63 -> 60, z -0.48.
+      const VOICE_WEIGHT = 0.5;
+      const pool = state.reinforcements.isengard;
+      if (a.mode !== 'recruit') {
+        const n = Math.min(2, state.regions['orthanc']!.units.isengard?.regular ?? 0, pool.elite);
+        return VOICE_WEIGHT * (n >= 2 ? 62 : 10);
+      }
       // A Regular in EVERY Isengard Settlement — one landing on a full stack is lost (report 3t5w710l563l4s4t).
       const held = ISENGARD_SETTLEMENTS.filter((r) => settlementCtrl(state, r) === 'shadow');
       const full = held.filter((r) => unitCount(state, r) >= STACKING_LIMIT).length;
-      return 40 + (held.length - full) * 9 - full * 12;
+      const placed = Math.min(held.length - full, pool.regular);
+      return VOICE_WEIGHT * (placed <= 1 ? 10 : 40 + placed * 9 - full * 12);
     }
     case 'useElvenRing': return elvenRingScore(state, actor, a);       // change a die's face (conservatively)
     case 'playEvent': {
@@ -1026,6 +1156,35 @@ function score(state: GameState, actor: Side, a: WotrAction, target: RegionId | 
         return fs.corruption >= 6 ? 95 : 25;
       }
       if (actor === 'shadow' && CORRUPT_EVENTS.has(a.cardId)) return 70;
+      // On the Mordor Track a special Hunt tile is in the pool for the Free Peoples' very
+      // next step, so it goes in before anything else (report jwmzip9icferu71a: Give it to
+      // Uss! came after recruiting the Mouth of Sauron).
+      if (actor === 'shadow' && SPECIAL_TILE_CARDS.has(a.cardId) && fs.mordor !== null) return 92;
+      // Threats and Promises bars a Muster die from advancing a passive Nation, so it goes
+      // down while the Free Peoples still hold one to spend (report ogkqsw8p1k3ygah3: played
+      // as the last action of the turn, after their Muster dice were gone).
+      if (actor === 'shadow' && a.cardId === 'sh-str-05' && fpCanMusterPassive(state)) return 66;
+      // Cruel Weather sets the Fellowship back one region; played while the Free Peoples can
+      // still move it this turn, they simply walk the region back (report qrfbl7pj707a7w0e:
+      // a Will of the West was still in hand). Held while they have a die that moves it and
+      // the Shadow keeps a die that can play the card later.
+      if (actor === 'shadow' && a.cardId === 'sh-char-10' && fpCanStillMoveFellowship(state) && shadowKeepsCardDie(state)) return 3;
+      // …and never played where every neighbour is nearer Mordor: from Rivendell, a dead end,
+      // both roads lead toward Mordor, so the card handed the Free Peoples a free step
+      // (report qvbtrxo6p0jag62o).
+      if (actor === 'shadow' && a.cardId === 'sh-char-10' && !cruelWeatherSetsBack(state)) return 0;
+      // The Day Without Dawn discards the Free Peoples' unused Will of the West dice, so it
+      // goes down while they still hold them, and waits while they hold none (report
+      // xy4mcfzfpp6ut5i6: played late, it caught one of two).
+      if (actor === 'shadow' && a.cardId === 'sh-str-04') {
+        const wills = state.dice.fp.filter((d) => d === 'will').length;
+        return wills ? 50 + wills * 20 : 1;
+      }
+      // Tried 2026-10-25: holding the special Hunt-tile cards (Shelob's Lair, The Ring is
+      // Mine!, On, On They Went, Give it to Uss!) while the Fellowship is more than four
+      // regions from Mordor, drawing a card instead and discarding them first at the hand
+      // limit (report 4rkhynhht4wkl4cn). Shadow −102 (heuristic) and −122 (human-like)
+      // per 4000: played early, the tile is waiting when the Fellowship arrives.
       // The Hunt-tile and Nazgûl-search cards are at their best while the Fellowship is
       // hidden and a reveal would land it in, or drag it through, a Shadow Stronghold on
       // its road — Moria, Minas Morgul, the Morannon — for the extra tile it draws there
@@ -1072,6 +1231,10 @@ function score(state: GameState, actor: Side, a: WotrAction, target: RegionId | 
       // for its combat half (Devilry of Orthanc). Same trap as Wormtongue (player
       // report: "played Threats & Promises after the Witch-King activated all FP nations").
       if (a.cardId === 'sh-str-05' && (['dwarves', 'elves', 'gondor', 'north', 'rohan'] as Nation[]).every((n) => state.nations[n].active)) return 1;
+      // Stormcrow's real prize is setting a Nation back on the Political Track; a Nation
+      // already at its farthest step only loses a unit (report fy8fvfwd0jgqrrom: the Elves
+      // at step 3 on turn 1). Kept for its combat half until a target can be set back.
+      if (actor === 'shadow' && a.cardId === 'sh-str-06' && stormcrowNations(state).every((n) => state.nations[n].step >= 3)) return 1;
       // A card with a strong COMBAT box (Deadly Strife etc.) is usually worth more
       // held for battle than played as its event — burning it is weak play (player
       // report: "Return to Valinor for the top half is VERY weak").
@@ -1080,6 +1243,15 @@ function score(state: GameState, actor: Side, a: WotrAction, target: RegionId | 
       // Shadow played Musterings of Long-planned War into a full Gorgoroth and removed
       // the five Southrons it had just recruited (player report 3t5w710l563l4s4t).
       const waste = actor === 'shadow' ? (FIXED_RECRUITS[a.cardId] ?? []).reduce((w, [r, n]) => w + Math.max(0, unitCount(state, r) + n - STACKING_LIMIT), 0) : 0;
+      // …and units the pool cannot supply are units the card never places: A New Power is
+      // Rising with three Isengard figures left recruited three of its six, where an attack
+      // first would have refilled the pool (report ceohaqegxw9j8mr9).
+      const fixed = actor === 'shadow' ? FIXED_RECRUITS[a.cardId] : undefined;
+      if (fixed) {
+        const pool = state.reinforcements[REGIONS[fixed[0]![0]]!.nation as Nation];
+        const short = Math.max(0, fixed.reduce((t, [, n]) => t + n, 0) - pool.regular - pool.elite);
+        if (short > 0) return 35 - combatCardValue(combatModsFor(a.cardId)) * 3 - waste * 8 - short * 8;
+      }
       return 35 - combatCardValue(combatModsFor(a.cardId)) * 3 - waste * 8;
     }
     case 'forceDiscardCard':
@@ -1092,7 +1264,11 @@ function score(state: GameState, actor: Side, a: WotrAction, target: RegionId | 
       return 20; // FP: lifting Palantír / Denethor's Folly is generally good value
     case 'drawEvent': return 12;
     case 'skipDie': return 1;
-    case 'pass': return 0;
+    // The Free Peoples pass rather than spend a die on a weak action while nothing presses
+    // them — a human holds dice back to answer the Shadow's moves (report cgvz3xaorxeczwjb).
+    // Measured 2026-11-08 against 2665e98: FP wins 1170 / 1191 -> 1188 / 1177 (heuristic
+    // Shadow); against the human-like FP the Shadow 1096 / 1096 -> 1072 / 1093.
+    case 'pass': return actor === 'fp' && !fpPressed(state) ? 25 : 0;
     default: return 2;
   }
 }
@@ -1138,18 +1314,43 @@ function diplomaticScore(state: GameState, actor: Side, nation: Nation): number 
     return proximity + army * 2 + saruman;
   }
   if (!ns.active) return 8;                                             // FP advances toward War reactively
+  // NOT shipped, 2026-11-07 (report y4e51heiq8055xok): holding back the first Free Peoples
+  // Nation to reach War, the Witch-king's door. Flat alone (1269 / 1274 vs 1270 / 1273);
+  // with the Moria hold, the Elven Ring and the muster rule below, ~130 per 4000 worse.
   // Finish one Nation before starting the next: a step only pays once the Nation is At
   // War, and North then Elves left both two steps short (report 334n152r4u1p2h3o).
   return ns.step === 1 ? 30 : ns.step === 2 ? 24 : 20;
 }
 
+/** A Shadow Army stands beside a Free Peoples Settlement worth Victory Points. */
+function fpPressed(state: GameState): boolean {
+  return (Object.keys(REGIONS) as RegionId[]).some((id) => (REGIONS[id]!.vp ?? 0) > 0 && settlementCtrl(state, id) === 'fp' && enemyNear(state, id, 'shadow', 1));
+}
+
+// NOT shipped, 2026-11-07 (report yibbe17joi301d6x): +40 / +45 for a Free Peoples recruit
+// into a City or Stronghold with a Shadow Army next door while a Muster die is in hand.
+// Flat alone (FP wins 1186 / 1194 vs 1176 / 1213); in the combined set, worse.
 /** Muster where it matters: into/near an existing army or near the campaign target —
  *  not a lone Nazgûl in an empty rear Stronghold (player report: "spent musters on
  *  nazgul in barad-dur (with no army) and angmar"). */
 function recruitScore(state: GameState, actor: Side, a: Extract<WotrAction, { kind: 'recruitUnit' }>, target: RegionId | null): number {
+  // A full region is a legal muster target (p.26 checks the limit after the action), but
+  // the AI stays out of it: the excess goes straight back to reinforcements. (A human may
+  // use it to swap an Elite in for a Regular; unmeasured for the AI, so not offered to it.)
+  if (unitCount(state, a.region) + a.regular + a.elite > STACKING_LIMIT) return -50;
   let s = actor === 'shadow' ? 30 : 16;
   if (armyHere(state, a.region, actor)) s += 10;                       // reinforce a real stack
   if (target) s += Math.max(0, 12 - dist(a.region, target) * 2);       // near the front
+  // The Shadow's Muster dice go to the Political Track, Minions, the Voice of Saruman and
+  // Nazgûl first; a plain recruit is the fallback (reports oqwst19crttqrf4p,
+  // 7yzh545b34c0eflm). A garrison for a threatened Settlement still comes first.
+  // Measured 2026-11-02, 2000 games x 2 families, Shadow wins: heuristic FP 730 / 727 ->
+  // 780 / 757, human-like FP 916 / 919 -> 1003 / 1003.
+  // NOT shipped: the last Muster die held back while the Witch-king waits and the Free
+  // Peoples hold a Muster die (report fvwx4i603yvyggw5) — 825 / 779, 1049 / 1064 against
+  // 824 / 787, 1093 / 1066: the held die mostly went unused.
+  const gap = garrisonGap(state, a.region, actor);
+  if (actor === 'shadow' && gap === 0) return Math.min(s, 14);
   // GARRISON. Mustering into an empty VP Settlement we hold is the cheapest possible
   // defence — it conjures a defender on the spot, so no army has to leave the front to
   // cover it. Weighted above the march-toward-the-target term, because losing a
@@ -1158,7 +1359,7 @@ function recruitScore(state: GameState, actor: Side, a: Extract<WotrAction, { ki
   // Scaled by how close the enemy is to their VP threshold: with the board quiet this
   // is exactly the weight measured when the term was introduced, but once they are
   // genuinely closing, covering our own Settlements outranks pressing the attack.
-  s += garrisonGap(state, a.region, actor) * ((REGIONS[a.region]!.vp ?? 0) * 20 + 30) * (1 + 1.5 * enemyPressure(state, actor));
+  s += gap * ((REGIONS[a.region]!.vp ?? 0) * 20 + 30) * (1 + 1.5 * enemyPressure(state, actor));
   // NOT a Free Peoples "muster where the Shadow is about to strike" term. Reports
   // 40736j3x5z665456, 1m4j350n0t1x0u6o, 6c502v5f6d1e6t5z (Gondor, the Woodland Realm,
   // Edoras) asked the FP to muster before the Fellowship moves when a Shadow Army is
@@ -1201,7 +1402,12 @@ function armyMoveScore(state: GameState, actor: Side, from: RegionId, to: Region
   const overflowsSiege = (id: RegionId) => actor === 'shadow' && besiegedGarrison(state, id, actor) > 0
     && unitCount(state, id) + unitCount(state, from) > STACKING_LIMIT;
   const held = (id: RegionId) => armyHere(state, id, enemy) || overflowsSiege(id);
-  if (settlementCtrl(state, to) === enemy && !held(to)) {
+  // A Fortification (Osgiliath, the Fords of Isen) is never captured and is worth nothing
+  // (p.10; the engine's captureIfEnemySettlement skips it), but it still read as an enemy
+  // Settlement, so walking an Army back onto an empty one scored a 25-point capture: the
+  // Shadow marched Fords of Isen -> Fangorn -> Fords of Isen, a die each way (seen in the
+  // snapshot of report xy4mcfzfpp6ut5i6, Westemnet <-> Fords of Isen).
+  if (settlementCtrl(state, to) === enemy && !held(to) && REGIONS[to]!.settlement !== 'Fortification') {
     s += (REGIONS[to]!.vp * 30 + 25) * (pressing ? 1.4 : 1);                                // capture
     s -= wakePrice(state, actor, to) * WAKE_W_ACTION;                                       // ...at the political price of it
   }
@@ -1220,6 +1426,13 @@ function armyMoveScore(state: GameState, actor: Side, from: RegionId, to: Region
   if (garrisonWorthy(state, actor, from) && unitCount(state, from) < 2) {
     s -= (REGIONS[from]!.vp * 14 + 10) * (1 + 1.5 * enemyPressure(state, actor));
   }
+  // …and the one unit that split leaves is itself only half a garrison beside an enemy
+  // Army that can storm it, which garrisonGap pays to top up. Charged here at the same
+  // rate, or the Shadow walked out of Angmar leaving one unit and straight back in to
+  // fill it, three Army dice in a row (self-play seed 3, turn 14).
+  if (actor === 'shadow' && garrisonWorthy(state, actor, from) && unitCount(state, from) === 2) {
+    s -= loneDefenderGap(state, from, actor) * (REGIONS[from]!.vp * 18 + 12) * (1 + 1.5 * enemyPressure(state, actor));
+  }
   // The Free Peoples walking their Army out of a Stronghold with a Shadow Army within
   // two regions: the garrison split leaves one unit, which reads as "held" above but
   // falls to the first assault. Erebor -> Dale and -> Iron Hills, Minas Tirith ->
@@ -1237,6 +1450,14 @@ function armyMoveScore(state: GameState, actor: Side, from: RegionId, to: Region
     && settlementCtrl(state, from) === 'fp' && !armyHere(state, to, 'shadow')) {
     const nations = (Object.keys(state.regions[from]!.units) as Nation[]).filter((n) => FP.has(n) && (state.regions[from]!.units[n]!.regular + state.regions[from]!.units[n]!.elite) > 0);
     if (nations.length && nations.every((n) => state.nations[n].step > 0)) s -= 60;
+  } else if (actor === 'fp' && !armyHere(state, to, 'shadow')) {
+    // …and one standing anywhere else goes home, if anywhere: the Iron Hills Army
+    // wandered to the Vale of the Carnen on turn 1 (report 385r451t3j5q0j0f — "humans
+    // would move the Iron Hills unit into Erebor for protection").
+    const u = state.regions[from]!.units;
+    const nations = (Object.keys(u) as Nation[]).filter((n) => FP.has(n) && (u[n]!.regular + u[n]!.elite) > 0);
+    const home = (REGIONS[to]!.settlement === 'Stronghold' || REGIONS[to]!.settlement === 'City') && settlementCtrl(state, to) === 'fp';
+    if (nations.length && nations.every((n) => state.nations[n].step > 0) && !home) s -= 40;
   }
   // Walking the field Army out of a siege we hold LIFTS it: the garrison is free again
   // and the next action is spent besieging it back. The Shadow did exactly that, in and
@@ -1258,10 +1479,30 @@ function armyMoveScore(state: GameState, actor: Side, from: RegionId, to: Region
     s += -(dist(to, target) - dist(from, target)) * (open ? 20 : 12) * (pressing ? 1.5 : 1);
     if (to === target) s += 30;
   }
+  // NOT shipped, 2026-11-04 (2000 games x 2 families against e9e3f7b; base Shadow wins
+  // 824 / 787 heuristic, 1093 / 1066 human-like; FP wins 1176 / 1213):
+  //  - no Shadow move carrying a single unit unless it captures (reports lwfzbpo5mi536dj7,
+  //    e6vw06s9p5c7fkgc, e70gksrzc98iwyjo): 802 / 818, 1080 / 1075 — even, and one
+  //    heuristic game ran to the action cap.
+  //  - Orthanc's Army stays home while Saruman can still build it, and the Voice stops
+  //    recruiting once 3+ Isengard units stand in the field (ka9zuc2c4ogqbc6y,
+  //    xlhaqs110nl0dqyc): 816 / 806, 1076 / 1053 — even, slightly down human-like.
+  //  - a Free Peoples Army under 5 units doesn't march to a non-Settlement more than two
+  //    regions from its target unless joining an Army (3u0wjxt92deb58ra): FP wins 1168 /
+  //    1156, -65.
+  //  - Minas Morgul's Army leaves by South Ithilien, not North, so it doesn't block the
+  //    Morannon's road (ku36pb4rjb7160eh, e70gksrzc98iwyjo): 833 / 810, but 1082 / 1032
+  //    human-like (-45).
   // Never march units into a stack that's already full: anything over the 10-unit
   // limit is removed (lost to reinforcements). Penalise per lost unit so the AI
   // would rather not move than over-stack and bleed its own army (player report).
-  const over = Math.max(0, unitCount(state, to) + unitCount(state, from) - STACKING_LIMIT);
+  // …but a Shadow move with room at the far end is trimmed to what fits before it is
+  // sent (maybeFitStack), so nothing is lost: charging it anyway froze the Shadow one
+  // unit short of a Stronghold assault — 5 in Lamedon beside Dol Amroth, 10 in Pelargir
+  // unable to join — and the game never ended (a soak timeout found while measuring
+  // report 63hl89a35stuc7as).
+  const trimmed = actor === 'shadow' && unitCount(state, to) < STACKING_LIMIT;
+  const over = trimmed ? 0 : Math.max(0, unitCount(state, to) + unitCount(state, from) - STACKING_LIMIT);
   if (over > 0) s -= 30 + over * 25;
   return s;
 }
@@ -1279,11 +1520,25 @@ function elvenRingScore(state: GameState, actor: Side, a: Extract<WotrAction, { 
     const faces = state.dice.fp;
     if (faces.includes('character') || faces.includes('will')) return -5; // already have one — don't pass a Ring to Shadow for free
     if (fs.mordor !== null) return 90;                                // Mordor Track: MUST keep moving
+    // NOT shipped, 2026-11-07 (report yurin5vxdq8j6zkt): an Elven Ring for a Character die
+    // whenever the Fellowship is hidden. Flat alone (FP wins 1202 / 1185 vs 1176 / 1213),
+    // but it hurried the Fellowship into Mordor (turn 7.3 vs 8.6) and was the worst piece of
+    // the combined Free Peoples set (leaving it out recovered 107 of the 130 lost).
     // Not merely to hide: re-hiding after a reveal buys little (the Shadow has acted by
     // then) and a hidden Fellowship feeds its tile cards (report 04291r2i296h5w1n).
     return -5;
   }
-  return (a.to === 'eye' && fs.mordor !== null) ? 35 : -5;            // Shadow: an Eye only when the Hunt is decisive
+  // …and only while the Free Peoples can still move the Fellowship this turn: a Hunt
+  // Box Eye bites only on a move. Revealed on the Track it must hide first, so it needs
+  // two Character-capable dice (report 214722232j396x52: the Eye after their last one).
+  // NOT shipped: the Ring turned to a Muster die to bring the Witch-king (report
+  // 0ov3z4onhjfdrdnp) — 816 / 793, 1078 / 1056 against 824 / 787, 1093 / 1066: the Ring is
+  // then gone when the Hunt wants it.
+  const fpRing = state.elvenRings.includes('fp') && !state.flags.fpUsedElvenRingThisTurn;
+  const movers = state.dice.fp.filter((f) => f === 'character' || f === 'will').length
+    + (fpRing && state.dice.fp.some((f) => f !== 'character' && f !== 'will') ? 1 : 0);
+  const canMove = movers >= (fs.hidden ? 1 : 2);
+  return (a.to === 'eye' && fs.mordor !== null && canMove) ? 35 : -5;  // Shadow: an Eye only when the Hunt is decisive
 }
 
 /** Initiating an independent-character move with a Character die. The big win is
@@ -1326,7 +1581,7 @@ function moveCharacterScore(state: GameState, actor: Side, a: Extract<WotrAction
     // Hidden or revealed: the re-roll comes from a Nazgûl in the Fellowship's region,
     // the figure's last-known spot (report 5d063j1g3f6s2w6x).
     const pressed = state.regions[a.to]!.nazgul > 0 || state.regions[a.to]!.characters.includes('witch-king');
-    if (a.char === 'nazgul') return (a.to === fellowshipRegion(state) && !MORDOR_ENTRANCES.includes(fs.location) && !pressed) ? 42 : 6; // never on the Mordor Track
+    if (a.char === 'nazgul') return (a.to === fellowshipRegion(state) && pressPays(state) && !pressed) ? 42 : 6; // never on the Mordor Track
     return 4; // Minions: situational
   }
   // A separated Companion used to score a flat 4 for every destination, so it never
@@ -1497,6 +1752,12 @@ function resolveChoice(state: GameState, legal: WotrAction[]): WotrAction {
         if (state.cards.shadow.table.includes(a.cardId) && !state.cards.shadow.hand.includes(a.cardId)) continue;
         const mods = combatModsFor(a.cardId);
         if (owner === 'shadow' && pc && mods?.symmetricBonus && sharedBonusEdge(state, owner, mods) <= 0) continue;
+        // Never from inside a besieged Stronghold: the attacker's 6s become 4s or 3s, and
+        // the card is spent on a fight the garrison has nearly always lost already
+        // (report m60xvxgtri6gz1ux: "eagerly plays Deadly Strife and Desperate Battle when
+        // besieged"). A minimum edge instead also refused the 2-against-6 field battle
+        // the earlier report 3w0r36515c5d2q6w asked for, so it is this narrower rule.
+        if (owner === 'shadow' && pc && mods?.symmetricBonus && pc.boxed === 'shadow') continue;
         let v = combatCardValue(mods);
         if (pc && isDiceMathCard(mods)) {
           // Held back for a better battle unless it does at least half what it could.
@@ -1655,17 +1916,20 @@ function resolveChoice(state: GameState, legal: WotrAction[]): WotrAction {
       // it costs an extra hit AND the unit, which is only ever worth it for a human
       // playing around a siege requirement.
       const steps = legal.filter((a) => a.kind === 'casualtyStep') as Extract<WotrAction, { kind: 'casualtyStep' }>[];
-      // Shadow in a battle: an Army of five or fewer units rolls a die per unit, so
-      // removing a Regular costs a die every round to come while reducing an Elite
-      // costs none — reduce the Elite (player report 0r0z4m1t2b260556, which also
-      // notes it dodges Great Host's 2:1 hit). Above five the dice are capped anyway,
-      // so shed Regulars as before; and a siege attacker keeps its Elites, which it
-      // spends to press the assault round after round.
-      if (steps.length && state.pendingChoice?.kind === 'combatCasualties' && state.pendingChoice.owner === 'shadow' && pc) {
+      // In a battle an Army of five or fewer units rolls a die per unit, so removing
+      // a Regular costs a die every round to come while reducing an Elite costs none —
+      // reduce the Elite (player report 0r0z4m1t2b260556 for the Shadow, which also
+      // notes it dodges Great Host's 2:1 hit; xxonzrpfvr2daycy for the Free Peoples,
+      // whose 5 Regulars and 2 Elites took 5 hits as five Regulars and went into the
+      // siege on 2 dice, not 4). Above five the dice are capped anyway, so shed
+      // Regulars as before; and a siege attacker keeps its Elites, which it spends
+      // to press the assault round after round.
+      if (steps.length && state.pendingChoice?.kind === 'combatCasualties' && pc) {
+        const owner = state.pendingChoice.owner;
         const d = state.pendingChoice.data as { region: RegionId; boxed?: boolean };
         const box = d.boxed ? state.regions[d.region]?.siegeBox : null;
         const units = box ? forceUnitCount(box) : unitCount(state, d.region);
-        const pressingSiege = pc.siege && pc.attacker === 'shadow';
+        const pressingSiege = pc.siege && pc.attacker === owner;
         if (units <= 5 && !pressingSiege) {
           const reduce = steps.find((a) => a.step === 'reduceElite');
           if (reduce) return reduce;
@@ -1758,7 +2022,7 @@ function resolveChoice(state: GameState, legal: WotrAction[]): WotrAction {
       // FUTURE Hunt, worth more than one roll now — otherwise take the roll.
       const guards = new Set(['fp-char-06', 'fp-char-07', 'fp-char-08']); // Axe and Bow / Horn of Gondor / Wizard's Staff
       const rip = legal.find((a) => a.kind === 'nazgulStrike' && a.discard && guards.has(a.discard));
-      return rip ?? legal.find((a) => a.kind === 'nazgulStrike' && !a.discard) ?? legal[0]!;
+      return rip ?? legal.find((a) => a.kind === 'nazgulStrike' && !a.discard && !a.decline) ?? legal[0]!;
     }
     case 'advanceChoice': {
       const adv = legal.find((a) => a.kind === 'advanceChoice' && a.advance) ?? legal[0]!;
@@ -1796,6 +2060,13 @@ function resolveChoice(state: GameState, legal: WotrAction[]): WotrAction {
         }
         if (!Object.keys(units).length) return stay;
         return { kind: 'advanceChoice', advance: true, move: { units } };
+      }
+      // The Free Peoples never march the last unit out of their own City or Stronghold
+      // after a win: Rivendell's Army struck at the Trollshaws, lost an Elite and walked
+      // its last one out, leaving Rivendell empty (report 0p4o6k63604e2m6s).
+      if (owner === 'fp' && adv.kind === 'advanceChoice' && adv.advance && (REGIONS[d.from]!.vp ?? 0) > 0 && settlementCtrl(state, d.from) === 'fp'
+        && (Object.keys(state.regions[d.from]!.units) as Nation[]).reduce((t, n) => t + (FP.has(n) ? state.regions[d.from]!.units[n]!.regular + state.regions[d.from]!.units[n]!.elite : 0), 0) <= 1) {
+        return legal.find((a) => a.kind === 'advanceChoice' && !a.advance) ?? adv;
       }
       if (adv.kind === 'advanceChoice' && adv.advance && garrisonWorthy(state, owner, d.from)) {
         const r = state.regions[d.from]!;
@@ -1839,10 +2110,10 @@ function resolveChoice(state: GameState, legal: WotrAction[]): WotrAction {
       return legal.find((a) => a.kind === 'relieveAdvance' && a.advance === join) ?? legal[0]!;
     }
     case 'lureChoice': {
-      // FP: absorb as Corruption unless that nears death — then sacrifice the Companion.
-      const level = (state.pendingChoice!.data as { level: number }).level;
-      const deadly = state.fellowship.corruption + level >= 10;
-      return legal.find((a) => a.kind === 'lureChoice' && a.mode === (deadly ? 'eliminate' : 'corruption')) ?? legal[0]!;
+      // FP: the tempted Companion goes. Paying his Level in Corruption to keep him buys
+      // a body worth about that much Hunt damage later, at a permanent cost now (report
+      // 115d3354331s686d: 2 Corruption to keep Legolas).
+      return legal.find((a) => a.kind === 'lureChoice' && a.mode === 'eliminate') ?? legal[0]!;
     }
     case 'huntPreventDraw': // FP Wizard's Staff: spend it to skip the draw when Corruption is dangerous
       return legal.find((a) => a.kind === 'huntPreventDraw' && a.prevent === (state.fellowship.corruption >= 7)) ?? legal[0]!;
@@ -1862,6 +2133,8 @@ function resolveChoice(state: GameState, legal: WotrAction[]): WotrAction {
       for (const a of plays) { const sc = score(state, 'fp', a, tgt); if (sc > bestS) { bestS = sc; best = a; } }
       return best ?? legal.find((a) => a.kind === 'freeCharEvent') ?? legal[0]!;
     }
+    case 'guideChoice': // the Fellowship changed: keep the Guide who already stepped in
+      return legal.find((a) => a.kind === 'guideChoice' && a.companion === state.fellowship.guide) ?? legal[0]!;
     case 'guideDraw': // Gandalf the Grey: take the free card
       return legal.find((a) => a.kind === 'guideDraw' && a.draw) ?? legal[0]!;
     case 'sorcererDraw': // Witch-king: take the free card
@@ -1885,8 +2158,12 @@ function resolveChoice(state: GameState, legal: WotrAction[]): WotrAction {
     }
     case 'preCombatRetreat': { // Scouts: retreat toward a friendly Settlement if possible
       const me: Side = state.pendingChoice!.owner;
-      const friendly = legal.find((a) => a.kind === 'preCombatRetreat' && settlementCtrl(state, a.region) === me);
-      return friendly ?? legal[0]!;
+      // The battle region itself is "withdraw into the Stronghold" — only when there
+      // is no region to fall back to (keeps the choice it made before that was offered).
+      const here = state.pendingCombat?.to;
+      const away = legal.filter((a) => a.kind === 'preCombatRetreat' && a.region !== here);
+      const friendly = away.find((a) => a.kind === 'preCombatRetreat' && settlementCtrl(state, a.region) === me);
+      return friendly ?? away[0] ?? legal[0]!;
     }
     case 'heroicDeath': {
       // If the hits would destroy the Army, sacrifice whoever saves it (a Leader
@@ -1943,7 +2220,14 @@ function resolveChoice(state: GameState, legal: WotrAction[]): WotrAction {
       if (!moves.length) return legal[0]!;
       const healSpots = (Object.keys(state.regions) as RegionId[]).filter((id) => isHealSettlement(state, id));
       const healDist = (t: RegionId): number => healSpots.reduce((m, h) => Math.min(m, dist(t, h)), Infinity);
-      const rank = (t: RegionId): number[] => [toMordor(t), huntClean(state, t) ? 0 : 1, huntThreat(state, t), healDist(t)];
+      // Re-roll sources COUNTED, not just present: Nazgûl alone beat Nazgûl and a Shadow
+      // Army (report 0s2c4f454g1g2i6e: North Ithilien chosen over South Ithilien).
+      const sources = (t: RegionId): number => {
+        const r = state.regions[t]!;
+        return (REGIONS[t]!.settlement === 'Stronghold' && settlementCtrl(state, t) === 'shadow' ? 1 : 0)
+          + (armyHere(state, t, 'shadow') ? 1 : 0) + (r.nazgul > 0 || r.characters.includes('witch-king') ? 1 : 0);
+      };
+      const rank = (t: RegionId): number[] => [toMordor(t), sources(t), huntThreat(state, t), healDist(t)];
       let best = moves[0]!, bestRank = rank(best.target);
       for (const a of moves.slice(1)) {
         const r = rank(a.target);
@@ -1953,7 +2237,9 @@ function resolveChoice(state: GameState, legal: WotrAction[]): WotrAction {
     }
     case 'eventTarget': return chooseEventTarget(state, legal);
     case 'musterSecond': // place the second figure of a two-figure muster (fuller build)
-      return legal.find((a) => a.kind === 'recruitSecond' && !a.done) ?? legal[0]!;
+      // Not into a full region (a Regular there would go straight back to reinforcements).
+      return legal.find((a) => a.kind === 'recruitSecond' && !a.done && (a.figure !== 'regular' || unitCount(state, a.region!) < STACKING_LIMIT))
+        ?? legal.find((a) => a.kind === 'recruitSecond' && a.done) ?? legal[0]!;
     case 'armyMove2': return chooseArmyMove2(state, legal);
     case 'charMove2': return chooseCharMove(state, legal);
     case 'stormcrowLoss': // forced loss: shed a Regular, then an Elite, keep Leaders
@@ -2001,7 +2287,7 @@ function chooseCharMove(state: GameState, legal: WotrAction[]): WotrAction {
   const fs = state.fellowship;
   const scoreMove = (a: Extract<WotrAction, { kind: 'moveCharacter' }>): number => {
     let s = 0;
-    if (owner === 'shadow' && a.char === 'nazgul' && a.to === fellowshipRegion(state) && !MORDOR_ENTRANCES.includes(fs.location)) {
+    if (owner === 'shadow' && a.char === 'nazgul' && a.to === fellowshipRegion(state) && pressPays(state)) {
       // Press the Fellowship, hidden or not — with ONE Ringwraith. The Hunt re-roll is
       // presence-gated, so the second wraith adds nothing; the die-driven chain
       // used to pile all five on (player report: 'spent [C] to move 5(!) Nazgul
@@ -2031,6 +2317,23 @@ function chooseCharMove(state: GameState, legal: WotrAction[]): WotrAction {
 
 /** Pick an interactive event-card target: prefer an attack/move toward the campaign
  *  target; for a Companion separation keep the strong ones (separate the lowest Level). */
+/** An Event card's attack the die-driven rules (score → 'attack') would never make:
+ *  outnumbered, short of twice a City's or Stronghold's defenders, or a sortie or
+ *  assault without twice the other side. */
+function cardAttackOutmatched(state: GameState, from: RegionId, to: RegionId): boolean {
+  const sortieBox = sortieForce(state, from, 'shadow') ?? sortieForce(state, from, 'fp');
+  if (sortieBox) return forceUnitCount(sortieBox) < unitCount(state, to) * 2;
+  const fromU = unitCount(state, from), toU = unitCount(state, to);
+  if (from === to) {
+    const box = state.regions[to]!.siegeBox;
+    const gar = box ? forceUnitCount(box) : 0;
+    return gar > 0 && fromU < gar * 2;
+  }
+  if (fromU < toU) return true;
+  const fortified = !!REGIONS[to]!.settlement && REGIONS[to]!.settlement !== 'Town' && toU > 0;
+  return fortified && fromU < toU * 2;
+}
+
 function chooseEventTarget(state: GameState, legal: WotrAction[]): WotrAction {
   const ets = legal.filter((a) => a.kind === 'eventTarget') as Extract<WotrAction, { kind: 'eventTarget' }>[];
   if (ets.length === 0) return legal[0]!;
@@ -2071,12 +2374,13 @@ function chooseEventTarget(state: GameState, legal: WotrAction[]): WotrAction {
       if (loc && !occupied) {
         const exit = MORDOR_ENTRANCES.reduce((b, e) => (dist(loc, e) < dist(loc, b) ? e : b), MORDOR_ENTRANCES[0]!);
         const d = dist(loc, a.region);
-        // Where the Fellowship can END its next declare or reveal: on its road, no
-        // farther out than the Progress it has banked — and the farther along, the
-        // likelier. From Rivendell with Progress 3 that is Moria, not the Fords of
-        // Bruinen behind it (report 6p6o0b22046d346i).
-        const reach = Math.max(1, state.fellowship.hidden ? state.fellowship.progress : 1);
-        if (d >= 1 && d <= reach && d + dist(a.region, exit) === dist(loc, exit)) return 20 + d * 10;
+        // Where the Fellowship will END its next declare or reveal: on its road, at the
+        // full Progress it has banked (or the entrance, if nearer) — stopping short
+        // throws Progress away, which the Free Peoples never do. From Rivendell with
+        // Progress 3 that is Moria (report 6p6o0b22046d346i); with Progress 2 it is
+        // Hollin, not the Fords of Bruinen or the Trollshaws (report kz0zb6v5xhdvy7my).
+        const reach = Math.min(dist(loc, exit), Math.max(1, state.fellowship.hidden ? state.fellowship.progress : 1));
+        if (d === reach && d + dist(a.region, exit) === dist(loc, exit)) return 20 + d * 10;
       }
       const staging = nazgulStagingBonus(state, 'nazgul', a.region as RegionId, target);
       if (staging > 0) return staging / 2;
@@ -2097,6 +2401,9 @@ function chooseEventTarget(state: GameState, legal: WotrAction[]): WotrAction {
       if (owner === 'fp' && a.companion !== 'nazgul') {
         const join = armyHere(state, a.region, 'fp') && !(a.from && armyHere(state, a.from, 'fp')) ? 18 : 0;
         const danger = settlementCtrl(state, a.region) === 'shadow' || armyHere(state, a.region, 'shadow') ? 40 : 0;
+        // No purpose, no move: "any or all" cards let them stay, and Merry and Pippin
+        // walked from Lórien to the Dimrill Dale for nothing (report 166z0y4r2k44421s).
+        if (rouse + join === 0) return -2;
         return 110 + rouse + join - danger;
       }
       return 110 + rouse - (target ? dist(a.region, target) : 0);
@@ -2106,6 +2413,8 @@ function chooseEventTarget(state: GameState, legal: WotrAction[]): WotrAction {
     // below (closest to the army campaign target) and pushed it from Hollin into
     // Moria (player report 4t142j4z4p205c20). A Nazgûl / Shadow Army already there
     // breaks ties (the Hunt re-roll).
+    // Stormcrow sets back the Nation nearest war, never one already at its farthest step.
+    if (a.card === 'sh-str-06' && a.nation) return 50 + (3 - state.nations[a.nation].step) * 15;
     if (a.card === 'sh-char-10' && a.region) {
       const away = Math.min(...MORDOR_ENTRANCES.map((e) => dist(a.region!, e)));
       const r = state.regions[a.region]!;
@@ -2126,6 +2435,11 @@ function chooseEventTarget(state: GameState, legal: WotrAction[]): WotrAction {
     // even a Stronghold attack (60 + 2 VP × 20).
     if (a.card === 'sh-char-24' && a.mode === 'recruit') return 101;
     if (a.companion) return 100 - levelOf(a.companion) * 10;          // separate the lowest-Level Companion
+    // …but not into a fight it loses. The card's attack is a die attack's: the same
+    // uphill and fortification margins apply (report cca118k2smx6lk2j: The Black Captain
+    // Commands sent 2 Elites and the Witch-king against 6 units in Edoras). Below 'done',
+    // so the card keeps its Nazgûl and skips the attack.
+    if (a.mode === 'attack' && a.to && a.from && cardAttackOutmatched(state, a.from as RegionId, a.to as RegionId)) return -10;
     if (a.mode === 'attack' && a.to) return 60 + REGIONS[a.to]!.vp * 20;
     // A card move may overstack (the excess is removed afterwards), so every unit past
     // the limit is simply thrown away. The Shadow used The Shadow Lengthens to pile two
@@ -2143,6 +2457,11 @@ function chooseEventTarget(state: GameState, legal: WotrAction[]): WotrAction {
     // Through a Day and a Night left Moria empty beside the North Dunland Army).
     if (a.to && a.from && owner === 'fp' && a.mode !== 'attack' && REGIONS[a.from]!.settlement
       && settlementCtrl(state, a.from) === 'fp' && enemyNear(state, a.from, 'shadow', 2)) return 5 - (target ? dist(a.to, target) : 0);
+    // …and a small Army does not walk out of its City or Stronghold on a card at all
+    // (report 2n496g3b4d6n3p54: Through a Day and a Night took one Elite and Gandalf the
+    // White from Edoras to the Folde).
+    if (a.to && a.from && owner === 'fp' && a.mode !== 'attack' && (REGIONS[a.from]!.settlement === 'City' || REGIONS[a.from]!.settlement === 'Stronghold')
+      && settlementCtrl(state, a.from) === 'fp' && unitCount(state, a.from) <= 2) return 5 - (target ? dist(a.to, target) : 0);
     if (a.to) return 30 - (target ? dist(a.to, target) : 0);          // move toward the target
     // Recruit placements: same region, Regular-or-Elite — take the Elite (two
     // player reports: Riders of Rohan / Dain's Ironfoot Guard mustered Regulars).

@@ -9,14 +9,14 @@ import {
 } from '../engine/phases';
 import { forfeit } from '../engine/victory';
 import { moveFellowship, hideFellowship, declareFellowship, enterMordor, removeCompanionOnMordorTrack, beginSeparation, placeSeparatedCompanion, placeSeparatedGroup, separationDestinations, separationRange, bringUpgrade, canBringAragorn, canBringGandalfWhite, gandalfWhiteCandidates, resolveLureChoice, eligibleGuides, setGuide, findCharacterRegion, MORDOR_ENTRANCES, fellowshipPath } from '../engine/fellowship';
-import { extraHunt, logRevealed, queueTakenAlive, wornWithSorrowOptions, resolveWornWithSorrow } from '../engine/hunt';
+import { extraHunt, logRevealed, queueTakenAlive, wornWithSorrowOptions, resolveWornWithSorrow, fellowshipInFpCityOrStronghold, gollumMayReveal } from '../engine/hunt';
 import { log, logCardDraw, sideDoes } from '../engine/log';
 import {
   recruit, moveArmy, moveArmySplit, canMoveSomeArmy, moveBlockReason, splitBlockReason, nationsAllowedInto, armySide, settlementController, heldShadowStronghold, unitCount, STACKING_LIMIT,
   recruitNazgul, canRecruitNazgul, overStack, overStackBox, forceSide, removeStackUnit, charDieLeaders, figureForce, forceUnitCount, characterInPlay,
 } from '../engine/armies';
 import { resolveCombatKill, startBattle, attackError, attackTargets, sortieForce, resolveCasualties, applyCasualties, pendingCasualtyOptions, resolveCasualtyStep, resolveAdvanceHoldBack, resolveAdvanceChoice, resolveContinue, resolveRetreat, resolveRetreatTo, resolvePreCombatRetreat, preCombatRetreatDestinations, resolveSiegeWithdraw, resolveSiegeExtend, resolveRelieveAdvance, resolveCombatCardCost, resolveBesiegerAdvance, resolveWhiteRider, resolveWordsOfPower, resolveHeroicDeath, retreatDestinations, canRetreat, playableCombatCards, resolvePlayCombatCard, resolveEventCasualties, garrisonFalls } from '../engine/combat';
-import { resolveHuntDamage, reduceHuntDamageBySeparate, huntReduceCards, resolveHuntPreventDraw, resolveHuntRedraw, resolveCrebain, huntResolutionPending, returnSetAsideHuntTiles } from '../engine/hunt';
+import { resolveHuntDamage, reduceHuntDamageBySeparate, huntReduceCards, forcedRandomOwed, resolveHuntPreventDraw, resolveHuntRedraw, resolveCrebain, huntResolutionPending, returnSetAsideHuntTiles } from '../engine/hunt';
 import { advancePolitical, advanceableNations, isAtWar } from '../engine/politics';
 import { shadowBarredFromRegion, threatsAndPromisesActive, palantirActive, fpForceDiscardMethods, FP_FORCE_DISCARD_CARDS, SH_FORCE_DISCARD_CARDS } from '../engine/persistent';
 import { canBringMinion, entryRegions, bringMinion, MINION_IDS } from '../engine/minions';
@@ -236,7 +236,7 @@ function legalActions(state: GameState, actor: Side): WotrAction[] {
       case 'nazgulStrike': {
         const d = state.pendingChoice!.data as { cards: string[] };
         return [...d.cards.map((c) => ({ kind: 'nazgulStrike' as const, discard: c })), { kind: 'nazgulStrike' as const },
-          ...(followOptions.nazgulStrikeAsPrinted ? [{ kind: 'nazgulStrike' as const, decline: true }] : [])];
+          { kind: 'nazgulStrike' as const, decline: true }]; // "you MAY": neither (Almanac)
       }
       case 'advanceChoice':
         // "Advance everything" and "hold position" as plain buttons; the UI's split
@@ -299,6 +299,9 @@ function legalActions(state: GameState, actor: Side): WotrAction[] {
           .map((deck) => ({ kind: 'bonusDraw' as const, deck })), { kind: 'bonusDraw', deck: 'none' }];
       case 'guideDraw':
         return [{ kind: 'guideDraw', draw: true }, { kind: 'guideDraw', draw: false }];
+      case 'guideChoice': // the Fellowship changed: keep the Guide or name another tied for the highest Level (p.38)
+        return [state.fellowship.guide, ...eligibleGuides(state).filter((c) => c !== state.fellowship.guide)]
+          .map((companion) => ({ kind: 'guideChoice' as const, companion }));
       case 'freeCharEvent': {
         // The Ents Awake: play one Character Event card NOW without a die, or decline.
         const acts: WotrAction[] = [];
@@ -343,13 +346,17 @@ function legalActions(state: GameState, actor: Side): WotrAction[] {
         return [...new Set(state.cards[actor].hand)].map((card) => ({ kind: 'discardCard', card }));
       case 'huntDamage': {
         const fs = state.fellowship;
-        const acts: WotrAction[] = [{ kind: 'huntDamage', mode: 'corruption' }];
+        // Foul Thing from the Deep: until its forced random casualty is taken, the only
+        // choices are that pick and the reductions that come before it (Almanac) — no
+        // straight Corruption and no Guide casualty.
+        const forced = forcedRandomOwed(state, state.pendingChoice!.data as { damage?: number; forceRandom?: boolean; casualty?: boolean });
+        const acts: WotrAction[] = forced ? [{ kind: 'huntDamage', mode: 'random' }] : [{ kind: 'huntDamage', mode: 'corruption' }];
         // ONE casualty per Hunt (p.42: "he must eliminate one Companion" — excess damage
         // "must still be taken as Corruption"). Once one has been spent this Hunt, only
         // the reduction abilities below remain (player report: the prompt kept offering
         // the Guide until three Companions were gone).
         const casualtySpent = !!(state.pendingChoice!.data as { casualty?: boolean } | undefined)?.casualty;
-        if (fs.companions.length > 0 && !casualtySpent) {
+        if (fs.companions.length > 0 && !casualtySpent && !forced) {
           acts.push({ kind: 'huntDamage', mode: 'guide' }, { kind: 'huntDamage', mode: 'random' });
         }
         // Guide damage-reduction abilities (−1 each): separate a Hobbit Guide, or
@@ -369,7 +376,7 @@ function legalActions(state: GameState, actor: Side): WotrAction[] {
         // drawn tile itself already reveals it (his card: only while it would stay
         // hidden; player report from a Mordor Eye+Reveal tile).
         const tileReveals = !!(state.pendingChoice!.data as { reveal?: boolean } | undefined)?.reveal;
-        if (fs.guide === 'gollum' && fs.hidden && !tileReveals) acts.push({ kind: 'huntDamage', mode: 'reduceReveal' });
+        if (gollumMayReveal(state) && !tileReveals) acts.push({ kind: 'huntDamage', mode: 'reduceReveal' });
         // One option PER on-table reducer — Axe and Bow vs Horn of Gondor is a real
         // choice (their keep-conditions differ; player report).
         for (const card of huntReduceCards(state)) acts.push({ kind: 'huntDamage', mode: 'reduceCard', card });
@@ -681,7 +688,7 @@ function dispatch(state: GameState, action: WotrAction, actor: Side): void {
       // Balrog of Moria is a CARD-SPECIFIC exception: its own text draws an extra tile
       // when the Fellowship is "declared or revealed" through Moria.
       if (balrogFires(state, traversed)) {
-        state.pendingChoice = { owner: 'shadow', kind: 'balrog', data: {} };
+        state.pendingChoice = { owner: 'shadow', kind: 'balrog', data: { declared: true } };
       }
       break;
     }
@@ -953,10 +960,12 @@ function dispatch(state: GameState, action: WotrAction, actor: Side): void {
       const f = figureForce(state, action.region, 'fp'); // open field, or a besieged garrison's box
       // Logged FIRST, naming the card: the loss is the cause of any capture that follows
       // (player report 6b674j562o2h4d17 — it used to read after the Stronghold fell).
-      const nn = nationName(action.nation);
+      // "An Elven Regular", as the battle casualties say it — not "an Elves Regular".
+      const nn = ({ elves: 'Elven', dwarves: 'Dwarven' } as Record<string, string>)[action.nation] ?? nationName(action.nation);
+      // The figure lost is the subject, like every other casualty line (player report 012p4v70195e4c55).
       log(state, null, 'event', action.figure === 'leader'
-        ? `Stormcrow banishes a Free Peoples Leader in ${action.region}`
-        : `Stormcrow banishes ${/^[AEIOU]/.test(nn) ? 'an' : 'a'} ${nn} ${action.figure === 'elite' ? 'Elite' : 'Regular'} in ${action.region}`);
+        ? `A Free Peoples Leader perishes in ${action.region}`
+        : `${/^[AEIOU]/.test(nn) ? 'An' : 'A'} ${nn} ${action.figure === 'elite' ? 'Elite' : 'Regular'} perishes in ${action.region}`);
       if (action.figure === 'leader') {
         if (f.leaders > 0) f.leaders -= 1; // FP Leaders are permanently removed (not to reinforcements)
       } else {
@@ -1000,14 +1009,19 @@ function dispatch(state: GameState, action: WotrAction, actor: Side): void {
     }
     case 'breakingSep': {
       requireChoice(state, 'breakingSep', actor); // FP separates a chosen Companion to the Fellowship's region
-      const data = state.pendingChoice!.data as { left: number };
+      const data = state.pendingChoice!.data as { left: number; picked?: string[] };
       const dest = state.fellowship.location;
       // On the Mordor Track there is no region to place him in: the Companion is
       // removed from play (p.43), the same as the FP's own separation cards there.
+      // Off it, each pick leaves the Fellowship now and the whole party is placed
+      // together once the last is chosen, so the log reads as one separation: "Strider,
+      // Boromir, Legolas separate from the Fellowship and move to …; Gimli becomes the
+      // Guide" (player report 4p396o3y0p4o5z45), not one line per Companion.
       if (state.fellowship.mordor !== null) removeCompanionOnMordorTrack(state, action.companion);
-      else if (beginSeparation(state, action.companion)) placeSeparatedCompanion(state, action.companion, dest);
+      else if (beginSeparation(state, action.companion)) data.picked = [...(data.picked ?? []), action.companion];
       data.left -= 1;
       if (data.left > 0 && state.fellowship.companions.some((c) => c !== 'gollum')) break; // re-prompt for the next
+      if (data.picked?.length) placeSeparatedGroup(state, data.picked, dest);
       // A save from before the end-of-Action draw (advance) may still carry the
       // Palantír draw parked behind this choice.
       state.pendingChoice = (state.pendingChoice!.data as { thenBonusDraw?: boolean }).thenBonusDraw
@@ -1027,6 +1041,11 @@ function dispatch(state: GameState, action: WotrAction, actor: Side): void {
       requireChoice(state, 'freeCharEvent', actor); // declined the Ents Awake free play — it is "immediately" or not at all
       state.flags.fpFreeCharEventThisTurn = false;
       log(state, null, 'event', 'Free Peoples decline to play another Character card (Gandalf the White)');
+      state.pendingChoice = null; break;
+    }
+    case 'guideChoice': {
+      requireChoice(state, 'guideChoice', actor);
+      if (action.companion !== state.fellowship.guide && !setGuide(state, action.companion)) throw new Error('Not an eligible Guide');
       state.pendingChoice = null; break;
     }
     case 'guideDraw': {
@@ -1289,6 +1308,11 @@ function dispatch(state: GameState, action: WotrAction, actor: Side): void {
       startBattle(state, actor, action.from, action.to, { rearguard: action.rearguard }); break; // finishCombat resumes the turn
     }
     // --- interactive combat choices (resolving state.pendingChoice) ---
+    case 'setPreference': {
+      // Changes nothing on the board and leaves the same player to act.
+      state.prefs = { ...state.prefs, alwaysAskCombatCard: { ...state.prefs?.alwaysAskCombatCard, [actor]: !!action.alwaysAskCombatCard } };
+      break;
+    }
     case 'playCombatCard': {
       requireChoice(state, 'combatCard', actor);
       resolvePlayCombatCard(state, action.cardId);
@@ -1371,7 +1395,8 @@ function dispatch(state: GameState, action: WotrAction, actor: Side): void {
       requireChoice(state, 'balrog', actor);
       // A reveal hands its Shadow Strongholds over to this choice so the card is asked
       // first; they draw once the Balrog is answered (see the revealMove handler).
-      const owedStrongholds = (state.pendingChoice!.data as { strongholds?: RegionId[] }).strongholds ?? [];
+      const balrogData = state.pendingChoice!.data as { strongholds?: RegionId[]; declared?: boolean };
+      const owedStrongholds = balrogData.strongholds ?? [];
       state.pendingChoice = null;
       const i = state.cards.shadow.table.indexOf('sh-char-17');
       if (action.use && i >= 0) {
@@ -1383,7 +1408,9 @@ function dispatch(state: GameState, action: WotrAction, actor: Side): void {
         // so (report wg37yx). The card is named here and on the Hunt line itself.
         log(state, null, 'event', 'Shadow discards Balrog of Moria to draw an extra Hunt tile as the Fellowship passes through Moria');
         state.log[state.log.length - 1]!.card = 'sh-char-17';
-        extraHunt(state, { source: 'Balrog of Moria' }); // may set a huntDamage choice for the FP
+        // "Ignore any 'Reveal' icon on the drawn tile if the Fellowship has been declared
+        // in a Free Peoples City or Stronghold" (card text), captured or not (Almanac).
+        extraHunt(state, { source: 'Balrog of Moria', ignoreReveal: !!balrogData.declared && fellowshipInFpCityOrStronghold(state) }); // may set a huntDamage choice for the FP
       }
       drawStrongholdHunts(state, owedStrongholds); // no-op on a declaration (none are owed)
       break; // Hunt Allocation phase was already set
@@ -1644,7 +1671,9 @@ function recruitRegions(state: GameState, side: Side, nation: Nation, cap = Infi
     if (def.nation !== nation || !def.settlement || def.settlement === 'Fortification') continue; // City/Town/Stronghold only (p.26)
     if (settlementController(state, id) !== side || armySide(state, id) === opp(side)) continue;
     if (state.regions[id]!.besieged) continue; // can't muster into a besieged Stronghold (p.26)
-    if (unitCount(state, id) >= STACKING_LIMIT && !followOptions.musterOverLimit) continue;
+    // A full region stays a target: the stacking limit is checked "at the end of any action
+    // (for example, after moving or mustering troops)" (p.26), and enforceStackingLimit then
+    // has the owner send the excess back to reinforcements (e.g. an Elite in, a Regular out).
     out.push(id);
     if (out.length >= cap) break;
   }
@@ -1824,6 +1853,12 @@ function drawOne(state: GameState, side: Side, deck: 'character' | 'strategy', r
 function owePostActionDraw(state: GameState, actor: Side, palantir: boolean, guide: boolean, deck: 'character' | 'strategy'): void {
   if (actor === 'shadow' && palantir) state.flags.actionEndDraw = { palantir: true };
   else if (actor === 'fp' && guide) state.flags.actionEndDraw = { guideDeck: deck };
+}
+
+/** Search playouts only: apply an action IN PLACE (no clone). On a throw the state is
+ *  left half-applied, so a caller must discard it — never use this on a live game. */
+export function applyActionInPlace(state: GameState, action: WotrAction, actor: Side): void {
+  dispatch(state, action, actor);
 }
 
 export const wotrAdapter: GameAdapter<GameState, WotrAction, Side> = {

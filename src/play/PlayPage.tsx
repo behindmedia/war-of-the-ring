@@ -28,6 +28,7 @@ import { BattlePopup, battleResultPending } from './BattlePopup';
 import { NoticePopup, NoticeText, noticePending, ROLL_QUESTIONS } from './NoticePopup';
 import { TurnSummary } from './TurnSummary';
 import { LogPanel, CopyLogButton } from './LogPanel';
+import { fullLog } from './fullLog';
 import { GameOverUpload, UploadLogButton } from './GameOverUpload';
 import { DiceStats } from './DiceStats';
 import { useSettings } from './settings';
@@ -37,7 +38,7 @@ import { ReportResponseModal } from './ReportResponseModal';
 import { getReporterId, getSeenResponses, markResponseSeen } from './reporterId';
 import { HoverPreview, type Hover } from './HoverPreview';
 import { dieOptions, describeAction, isCardRecruitTarget, isCardArmyMoveTarget, isSplitCardAttack, isSecondMusterTarget, trivialDie, isCardRegionPick } from './actionText';
-import { moveBlockReason, musterBlockReason, cardPathBlockReason, regionHops, companionLandingActivates } from '../engine/armies';
+import { moveBlockReason, musterBlockReason, cardRouteNextSteps, regionHops, companionLandingActivates, unitCount, STACKING_LIMIT } from '../engine/armies';
 import { basicMoveHintsApply } from './blockHints';
 import { panelShowsAction, isSpatial, isCardCompanionMove } from './panelFilter';
 import { movableCharsAt, characterDestinations, characterMoveBlockReason, companionGroupLeader, companionGroupDestinations, companionGroupBlockReason, CARD_COMPANION_MOVE_OPTS } from '../engine/charMove';
@@ -46,6 +47,13 @@ import { separationActivates, separationBlockReason, revealMoveBlockReason } fro
 import { REGIONS, levelOf, sideOfNation, nationName, EVENT_BY_ID } from '../engine/data';
 import { threatsAndPromisesActive } from '../engine/persistent';
 import { charName } from './charInfo';
+
+/** Athelas, There Is Another Way and Bilbo's Song are playable at no Corruption (Almanac),
+ *  where they heal nothing — There Is Another Way still moves or hides with Gollum guiding. */
+function healsNothing(v: GameState, cardId: string): boolean {
+  if (!['fp-char-09', 'fp-char-10', 'fp-char-12'].includes(cardId) || v.fellowship.corruption > 0) return false;
+  return !(cardId === 'fp-char-10' && v.fellowship.guide === 'gollum');
+}
 
 /** What to click for an Event card whose next step is ONE region on the map (a card
  *  striking an Army, Cruel Weather's region). Named by the map banner. */
@@ -86,7 +94,7 @@ function ResolvingCard({ view, onHoverCard }: { view: GameState; onHoverCard: (i
     <>
       <button data-testid="resolving-card" onClick={() => setZoom(true)} onMouseEnter={() => onHoverCard(card)} onMouseLeave={() => onHoverCard(null)}
         title="The Event card being resolved — click to enlarge"
-        style={{ position: 'absolute', top: 38, left: 6, zIndex: 6, padding: '4px 9px', fontSize: 12, fontFamily: 'system-ui', background: 'rgba(28,23,16,0.92)', color: '#e9e1cc', border: '1px solid #c9a24a', borderRadius: 6, cursor: 'zoom-in', boxShadow: '0 2px 8px #0008' }}>
+        style={{ position: 'absolute', top: 38, left: 6, zIndex: 6, padding: '4px 9px', fontSize: 12, fontFamily: 'system-ui', background: 'rgba(28,23,16,0.92)', color: '#e9e1cc', border: '1px solid #c9a24a', borderRadius: 6, cursor: 'pointer', boxShadow: '0 2px 8px #0008' }}>
         <span style={{ color: '#b9b29c' }}>Resolving:</span> <b style={{ textDecoration: 'underline dotted', textUnderlineOffset: 2 }}>{EVENT_BY_ID[card]!.name}</b>
       </button>
       {zoom && <CardZoom id={card} onClose={() => setZoom(false)} />}
@@ -120,6 +128,10 @@ export function PlayPage({ client, onExit }: { client: GameClientApi; onExit?: (
   // Move-receipt times for the game log (feature F): re-fetched whenever the log
   // grows. Best-effort — a failed fetch just leaves the log undated.
   const [logTimes, setLogTimes] = useState<LogTime[]>([]);
+  // The log panels show the whole game, not just the newest 500 entries the state keeps
+  // (player report jag3mymgg4tqwute; src/play/fullLog.ts).
+  const logView = useMemo(() => (g.view && client.gameKey
+    ? { ...g.view, log: fullLog(`${client.gameKey}:${g.you ?? 'all'}`, g.view.log ?? []) } : g.view), [g.view, g.you, client.gameKey]);
   const logLen = g.view?.log?.length ?? 0;
   useEffect(() => {
     let cancelled = false;
@@ -181,13 +193,15 @@ export function PlayPage({ client, onExit }: { client: GameClientApi; onExit?: (
   const [minionPick, setMinionPick] = useState<string | null>(null);
   const minionAutoDie = useRef(false); // the pick selected the paying die itself
   // Choosing WHO travels in a Companion group, before its destination (CompanionPicker).
-  const [compPick, setCompPick] = useState<{ from: RegionId; candidates: string[]; card?: string; separate?: boolean } | null>(null);
+  // `required`/`fixed`: Dead Men of Dunharrow — Strider/Aragorn must go, and the card
+  // moves the group directly to its named places rather than by Level.
+  const [compPick, setCompPick] = useState<{ from: RegionId; candidates: string[]; card?: string; separate?: boolean; required?: string[]; fixed?: RegionId[] } | null>(null);
   // The rest of a group being separated from the Fellowship: the first Companion goes
   // with the die, these join him in the separation step that follows (p.39).
   const sepQueue = useRef<string[]>([]);
   // When a clicked region offers more than one thing to move (e.g. the army AND its
   // Nazgûl), let the player choose which.
-  const [moveMenu, setMoveMenu] = useState<{ region: RegionId; options: Array<{ kind: 'army'; char?: undefined; chars?: undefined } | { kind: 'assault'; char?: undefined; chars?: undefined } | { kind: 'muster'; char?: undefined; chars?: undefined } | { kind: 'chargroup'; chars: string[]; char?: undefined } | { kind: 'char'; char: string; chars?: undefined } | { kind: 'cardchar'; act: WotrAction; label: string; char?: undefined; chars?: undefined } | { kind: 'cardgroup'; acts: WotrAction[]; char?: undefined; chars?: undefined } | { kind: 'cardcomps'; chars: string[]; card: string; char?: undefined } | { kind: 'separate'; chars: string[]; char?: undefined }> } | null>(null);
+  const [moveMenu, setMoveMenu] = useState<{ region: RegionId; options: Array<{ kind: 'army'; char?: undefined; chars?: undefined } | { kind: 'assault'; char?: undefined; chars?: undefined } | { kind: 'muster'; char?: undefined; chars?: undefined } | { kind: 'chargroup'; chars: string[]; char?: undefined } | { kind: 'char'; char: string; chars?: undefined } | { kind: 'cardchar'; act: WotrAction; label: string; char?: undefined; chars?: undefined } | { kind: 'cardgroup'; acts: WotrAction[]; char?: undefined; chars?: undefined } | { kind: 'cardcomps'; chars: string[]; card: string; required?: string[]; fixed?: RegionId[]; char?: undefined } | { kind: 'separate'; chars: string[]; char?: undefined }> } | null>(null);
   const [musterMenu, setMusterMenu] = useState<RegionId | null>(null); // board-click muster: the chosen Settlement
   // Choosing HOW MANY Nazgûl to move from a stack (RAW: move any number, not the whole group).
   // `card` set = this came from a Nazgûl-moving EVENT CARD, so confirming submits an
@@ -260,8 +274,16 @@ export function PlayPage({ client, onExit }: { client: GameClientApi; onExit?: (
   const seenNow = useRef({ hunt: 0, battle: 0, notice: 0 });
   const seenBefore = useRef<Array<{ hunt: number; battle: number; notice: number }>>([]);
   const undoRestore = useRef<{ hunt: number; battle: number; notice: number } | null>(null);
+  // A heal card played with nothing to heal is legal (Almanac) but nearly always a slip,
+  // so it waits here for a confirm; `noEffectOk` lets the confirmed one through.
+  const [noEffect, setNoEffect] = useState<Extract<WotrAction, { kind: 'playEvent' }> | null>(null);
+  const noEffectOk = useRef<WotrAction | null>(null);
   const submit = useCallback(async (a: WotrAction) => {
     if (inFlight.current) return;
+    if (a.kind === 'playEvent' && g.view && healsNothing(g.view, a.cardId)) {
+      if (noEffectOk.current !== a) { setNoEffect(a); return; }
+      noEffectOk.current = null;
+    }
     // Taken first, before anything renders: a roll shown with its question is marked
     // seen on answering, and undoing that answer should bring the roll back with it.
     const seenAtAction = { ...seenNow.current };
@@ -304,6 +326,21 @@ export function PlayPage({ client, onExit }: { client: GameClientApi; onExit?: (
     catch { return false; }
     finally { inFlight.current = false; setBusy(false); }
   }, [g, activeDie]);
+
+  // ⚙ "Combat card question" reaches the engine as the player's own setPreference action,
+  // sent on their move. Online only: a local game has no opponent to hide a hand from, and
+  // an automatic action there would sit on the Undo stack (Undo would just re-send it).
+  const prefSent = useRef<string | null>(null);
+  useEffect(() => {
+    if (client.undo || !g.view || !g.you || !g.yourTurn || g.gameOver || inFlight.current) return;
+    const want = settings.combatCardAsk === 'always';
+    const have = !!g.view.prefs?.alwaysAskCombatCard?.[g.you as Side];
+    if (want === have) { prefSent.current = null; return; }
+    const sig = `${g.you}:${want}`;
+    if (prefSent.current === sig) return;
+    prefSent.current = sig;
+    g.submit({ kind: 'setPreference', alwaysAskCombatCard: want }).catch(() => { prefSent.current = null; });
+  }, [client, g, settings.combatCardAsk]);
 
   // Undo (local hotseat / vs-AI only — the online client has no undo()). A
   // foreknowledge undo (one that crosses a dice roll / card draw) requires an explicit
@@ -503,6 +540,12 @@ export function PlayPage({ client, onExit }: { client: GameClientApi; onExit?: (
   // 186w6s0a051h4534, 231u2i4l5p19426w).
   const cardCompMoves = useMemo(() => g.legalActions.filter((a): a is Extract<WotrAction, { kind: 'eventTarget' }> => isCardCompanionMove(a)), [g.legalActions]);
   const cardCompSources = useMemo(() => new Set(cardCompMoves.map((a) => a.from!)), [cardCompMoves]);
+  // A card that moves Companions DIRECTLY to named places — Dead Men of Dunharrow, "to
+  // Erech, Lamedon or Pelargir" — has no range: the places it offers are the whole
+  // answer. Reading them by Level lit Aragorn's ordinary walking range instead and
+  // refused the far ones (player report m6mk0a18j9oksjwf).
+  const directCompDests = useCallback((card: string, from: RegionId, char: string): RegionId[] =>
+    cardCompMoves.filter((a) => a.direct && a.card === card && a.from === from && a.companion === char).map((a) => a.region!), [cardCompMoves]);
   // A card's bare REGION pick — the Army it strikes, the Nazgûl the Eagles fall on, where
   // Cruel Weather blows the Fellowship: a highlighted region to click, not a modal button
   // (player reports 45031a1d013o5x0m, 6z342y5h274r046w).
@@ -591,16 +634,9 @@ export function PlayPage({ client, onExit }: { client: GameClientApi; onExit?: (
     if (budget <= 1) return null;
     const nations = (Object.keys(g.view.regions[selected]?.units ?? {}) as Nation[])
       .filter((n) => (g.you === 'fp') === FP_NATIONS.has(n));
-    const steps = new Set<RegionId>();
-    if (route.length < budget) {
-      for (const n of REGIONS[head]?.adjacency ?? []) {
-        // A route MAY walk back through a region it has already entered (only ENDING
-        // where it started is barred, and the engine never offers that destination) —
-        // barring revisits here made legal detours impossible to trace (player report
-        // 306c5v2g003c6332).
-        if (!cardPathBlockReason(g.view, selected as RegionId, [...route, n as RegionId], g.you as Side, nations)) steps.add(n as RegionId);
-      }
-    }
+    // Only steps from which the card can still END somewhere it allows (see
+    // cardRouteNextSteps — player report kglsmlh727juow8r).
+    const steps = cardRouteNextSteps(g.view, selected as RegionId, route, legs.map((a) => a.to as RegionId), budget, g.you as Side, nations);
     const finish = legs.find((a) => a.to === head) ?? null;
     return { head, budget, steps, finish, left: budget - route.length };
   }, [selected, route, cardMoveActs, g.view, g.you]);
@@ -704,8 +740,8 @@ export function PlayPage({ client, onExit }: { client: GameClientApi; onExit?: (
       const name = EVENT_BY_ID[cardCompMoves[0]!.card]?.name ?? 'The card';
       out.push(`${name}: move Companions — click a highlighted region, then where they go.`);
     }
-    // The Ents Awake: one Character card from the hand, free (player report 1q4m361n2s444f4d).
-    if (g.view?.pendingChoice?.kind === 'freeCharEvent' && g.yourTurn) out.push('The Ents Awake: you may play a Character Event card from your hand now, without a die — click it in your hand, or "Done" to play none.');
+    // No line for The Ents Awake's free Character card: it is played from the hand, not
+    // the map, and the decision modal already asks it (player report pfe5j4wxghgvfeam).
     // No hint for bringing a Character into play: that is a side-panel action with nothing
     // to do on the map first (player report 5b1q2u530o1u6u6a).
     // (A card striking one region is named by the map banner — see cardRegionBanner.)
@@ -731,12 +767,14 @@ export function PlayPage({ client, onExit }: { client: GameClientApi; onExit?: (
   const charDestinations = useMemo(
     // `group` matters for Gandalf the White: Shadowfax's four regions depend on who
     // rides WITH him, so the highlighted destinations must know the travelling party.
-    () => (g.view && charPick && g.you ? new Set(charPick.card
+    () => (g.view && charPick && g.you ? new Set(charPick.card && directCompDests(charPick.card, charPick.from, charPick.char).length
+      ? directCompDests(charPick.card, charPick.from, charPick.char)
+      : charPick.card
       ? companionGroupDestinations(g.view, g.you as Side, charPick.from, charPick.group ?? [charPick.char], CARD_COMPANION_MOVE_OPTS[charPick.card] ?? {})
       : charPick.group
       ? companionGroupDestinations(g.view, g.you as Side, charPick.from, charPick.group)
       : characterDestinations(g.view, g.you as Side, charPick.char, charPick.from)) : new Set<RegionId>()),
-    [g.view, charPick, g.you],
+    [g.view, charPick, g.you, directCompDests],
   );
   // Among the destinations of a separation OR any Companion move (die or card), the
   // ones that ROUSE a passive Free Peoples Nation — marked ★, the same way everywhere
@@ -763,7 +801,7 @@ export function PlayPage({ client, onExit }: { client: GameClientApi; onExit?: (
   // Begin moving whatever was chosen from a region: an army (select for the picker)
   // or a specific independent character (Nazgûl/Minion/Companion).
   const beginMove = useCallback((region: RegionId, opt: { kind: 'army' } | { kind: 'assault' } | { kind: 'muster' } | { kind: 'chargroup'; chars: string[] } | { kind: 'char'; char: string }
-    | { kind: 'cardchar'; act: WotrAction; label: string } | { kind: 'cardgroup'; acts: WotrAction[] } | { kind: 'cardcomps'; chars: string[]; card: string } | { kind: 'separate'; chars: string[] }) => {
+    | { kind: 'cardchar'; act: WotrAction; label: string } | { kind: 'cardgroup'; acts: WotrAction[] } | { kind: 'cardcomps'; chars: string[]; card: string; required?: string[]; fixed?: RegionId[] } | { kind: 'separate'; chars: string[] }) => {
     setMoveMenu(null);
     // Separating from the Fellowship: one Companion left goes straight to the map;
     // several open the picker to choose who leaves together.
@@ -779,7 +817,7 @@ export function PlayPage({ client, onExit }: { client: GameClientApi; onExit?: (
     if (opt.kind === 'cardcomps') {
       setSelected(null);
       if (opt.chars.length === 1) setCharPick({ from: region, char: opt.chars[0]!, card: opt.card });
-      else { setCharPick(null); setCompPick({ from: region, candidates: opt.chars, card: opt.card }); }
+      else { setCharPick(null); setCompPick({ from: region, candidates: opt.chars, card: opt.card, ...(opt.required ? { required: opt.required, fixed: opt.fixed } : {}) }); }
       return;
     }
     // A card's Companion pick: submitting it makes the destinations legal, and those
@@ -878,6 +916,11 @@ export function PlayPage({ client, onExit }: { client: GameClientApi; onExit?: (
       }
       if (id === charPick.from) { setCharPick(null); return; } // click the piece again to cancel
       // A card's Companion move: say why this region is refused, in the group's terms.
+      if (charPick.card && directCompDests(charPick.card, charPick.from, charPick.char).length) {
+        const names = directCompDests(charPick.card, charPick.from, charPick.char).map((r) => REGIONS[r]?.name ?? r);
+        setBlockMsg(`This card moves them only to ${names.length < 2 ? names[0] : `${names.slice(0, -1).join(', ')} or ${names[names.length - 1]}`}.`);
+        return;
+      }
       if (charPick.card && g.view) {
         const reason = companionGroupBlockReason(g.view, 'fp', charPick.from, id, charPick.group ?? [charPick.char], CARD_COMPANION_MOVE_OPTS[charPick.card] ?? {});
         if (reason) setBlockMsg(reason);
@@ -950,10 +993,16 @@ export function PlayPage({ client, onExit }: { client: GameClientApi; onExit?: (
     const compsHere = g.you === 'fp' ? charsHere.filter((c) => c !== 'nazgul') : [];
     const soloHere = compsHere.length >= 2 ? charsHere.filter((c) => !compsHere.includes(c)) : charsHere;
     // A card is asking WHICH Companions travel: offer each, and the group.
-    const cardHere = cardCharPicks.filter((a) => a.from === id);
-    const cardCompsHere = [...new Set(cardCompMoves.filter((a) => a.from === id).map((a) => a.companion!))];
+    // Dead Men of Dunharrow: whoever goes WITH Strider/Aragorn joins him in the same
+    // group picker as every other Companion move, he ticked and locked, rather than
+    // one menu entry per Companion (player report m6mk0a18j9oksjwf).
+    const directHere = cardCompMoves.filter((a) => a.from === id && a.direct);
+    const directLead = [...new Set(directHere.map((a) => a.companion!))];
+    const cardHere = cardCharPicks.filter((a) => a.from === id && !(directHere.length && a.card === directHere[0]!.card));
+    const directWith = directHere.length ? cardCharPicks.filter((a) => a.from === id && a.card === directHere[0]!.card).map((a) => a.companion!) : [];
+    const cardCompsHere = [...new Set([...cardCompMoves.filter((a) => a.from === id).map((a) => a.companion!), ...directWith])];
     const opts: Array<{ kind: 'army' } | { kind: 'assault' } | { kind: 'muster' } | { kind: 'chargroup'; chars: string[] } | { kind: 'char'; char: string }
-      | { kind: 'cardchar'; act: WotrAction; label: string } | { kind: 'cardgroup'; acts: WotrAction[] } | { kind: 'cardcomps'; chars: string[]; card: string } | { kind: 'separate'; chars: string[] }> = [
+      | { kind: 'cardchar'; act: WotrAction; label: string } | { kind: 'cardgroup'; acts: WotrAction[] } | { kind: 'cardcomps'; chars: string[]; card: string; required?: string[]; fixed?: RegionId[] } | { kind: 'separate'; chars: string[] }> = [
       // The Army comes first, ahead of any figures a card moves on their own (player
       // report 6u1k505o3m1k2i1r).
       ...(armyHere ? [{ kind: 'army' as const }] : []),
@@ -961,7 +1010,8 @@ export function PlayPage({ client, onExit }: { client: GameClientApi; onExit?: (
       // Only Companions travel as a group on a card; Nazgûl each fly on their own, so a
       // Nazgûl "group" pick left the second figure un-pickable (player report 2m6j6f1z5w07390y).
       ...(cardHere.length >= 2 && !cardHere.some((a) => a.companion === 'nazgul' || a.companion === 'witch-king') ? [{ kind: 'cardgroup' as const, acts: cardHere as WotrAction[] }] : []),
-      ...(cardCompsHere.length ? [{ kind: 'cardcomps' as const, chars: cardCompsHere, card: cardCompMoves[0]!.card }] : []),
+      ...(cardCompsHere.length ? [{ kind: 'cardcomps' as const, chars: cardCompsHere, card: cardCompMoves[0]!.card,
+        ...(directHere.length ? { required: directLead, fixed: [...new Set(directHere.map((a) => a.region!))] } : {}) }] : []),
       ...(assaultHere ? [{ kind: 'assault' as const }] : []),
       ...(compsHere.length >= 2 ? [{ kind: 'chargroup' as const, chars: compsHere }] : []),
       ...soloHere.map((c) => ({ kind: 'char' as const, char: c })),
@@ -1074,7 +1124,7 @@ export function PlayPage({ client, onExit }: { client: GameClientApi; onExit?: (
     if (!s?.canUndo) return;
     if (s.foreknowledge) setUndoConfirm(true); else void runUndo();
   };
-  // Undo button lives inline in the status bar (to the right of the Elven Rings).
+  // Undo button lives inline in the status bar.
   const undoButton = undoCap ? (
     <button onClick={onUndoClick} disabled={!undoCap.canUndo}
       title={undoCap.reason ?? (undoCap.canUndo ? (undoCap.foreknowledge ? 'Undo back past a random outcome you have seen (recorded)' : 'Undo your last action') : 'Nothing to undo')}
@@ -1241,8 +1291,14 @@ export function PlayPage({ client, onExit }: { client: GameClientApi; onExit?: (
             board renders LARGE and fills it with no letterbox bars; the info panel
             (flex:1) takes the rest. 1.1464 = crop aspect (1511/1318); the ~16px is just
             padding — the status bar moved into the right column, so the board now spans
-            the full viewport height (and widens to match, per its aspect). */}
-        <div style={{ width: 'min(74vw, calc((100vh - 16px) * 1.1464))', flexShrink: 0, minHeight: 0, display: 'flex', flexDirection: 'column', padding: 2 }}>
+            the full viewport height (and widens to match, per its aspect). Never wider
+            than the screen less the info panel's 360px minimum and this column's 2px
+            padding each side: at 74vw an iPad (1180 wide) pushed the panel 57px
+            off-screen and the whole page scrolled sideways (player report
+            jzhlm97brwx32j73). But never below the old 74vw (at most 640px) for that: on
+            a phone the screen less 364px is next to nothing, and the map shrank to a
+            sliver (player report ac8k2fd8iu4bcyxw) — there the page scrolls as before. */}
+        <div style={{ width: 'min(74vw, max(calc(100vw - 364px), min(74vw, 640px)), calc((100vh - 16px) * 1.1464))', flexShrink: 0, minHeight: 0, display: 'flex', flexDirection: 'column', padding: 2 }}>
           {/* THE MAP'S BOX IS THE COLUMN'S ONLY FLOW CHILD. Every banner below is
               absolutely positioned inside it, because each one of them used to be a
               flow sibling that stole height from the board — so the map visibly shrank
@@ -1254,17 +1310,8 @@ export function PlayPage({ client, onExit }: { client: GameClientApi; onExit?: (
               column (561d44030f1l3m6s). Nothing that appears and disappears may live in
               this column's flow — put it in the overlay stack instead. */}
           <div style={{ flex: 1, minHeight: 0, overflow: 'hidden', position: 'relative' }}>
-            <Board view={g.view} onPickRegion={pickRegion} onHoverRegion={onHoverRegion} highlights={highlights} />
+            <Board view={g.view} onPickRegion={pickRegion} onHoverRegion={onHoverRegion} onHoverChar={onHoverChar} highlights={highlights} />
             <ResolvingCard view={g.view} onHoverCard={onHoverCard} />
-            {/* The Ents Awake rider: one Character Event playable without a die. Surface
-                it — a player couldn't tell why a card was suddenly playable ("I didn't
-                have an [E] or [C] die left... so I did"). Pinned TOP so it can never
-                collide with the message stack at the bottom. */}
-            {g.you === 'fp' && g.view.flags?.fpFreeCharEventThisTurn && (
-              <div style={{ position: 'absolute', left: 8, right: 8, top: 8, zIndex: 18, pointerEvents: 'none', color: '#bfe6bf', background: 'rgba(29,47,29,0.95)', border: '1px solid #3a5a3a', fontFamily: 'system-ui', fontSize: 13, padding: '5px 10px', borderRadius: 6, boxShadow: '0 4px 18px rgba(0,0,0,0.7)' }}>
-                🌳 The Ents Awake: you may play ONE Character Event card without spending a die (your next Character-card play is free).
-              </div>
-            )}
             {/* Bottom message stack, most urgent first: the refused-action error, the
                 refusal reason, then the ambient "what to click" hint. A COLUMN, so two
                 of them showing at once stack instead of drawing on top of each other.
@@ -1279,8 +1326,14 @@ export function PlayPage({ client, onExit }: { client: GameClientApi; onExit?: (
                     {trace.left > 0 ? ` · ${trace.left} step${trace.left === 1 ? '' : 's'} left` : ' · no steps left'}
                   </span>
                   <span style={{ color: '#b9d6a3' }}>
-                    {trace.steps.size > 0 ? 'Click a highlighted region to walk one step.' : 'Nowhere further to go.'}
+                    {trace.steps.size > 0 ? 'Click a highlighted region to walk one step.' : trace.finish ? 'Nowhere further to go.' : 'The card cannot end here — go back a step or cancel.'}
                   </span>
+                  {route.length > 0 && (
+                    <button onClick={() => setRoute((r) => r.slice(0, -1))}
+                      style={{ padding: '3px 10px', fontSize: 12, lineHeight: '16px', borderRadius: 6, cursor: 'pointer', background: 'transparent', color: '#cfe3c0', border: '1px solid #6ea84f' }}>
+                      ↶ back a step
+                    </button>
+                  )}
                   {trace.finish && (
                     <button onClick={() => { const act = trace.finish!; const path = [...route]; clearMove();
                       if (act.mode === 'attack' && !isSplitCardAttack(act)) setMoveDraft({ from: act.from!, to: act.to!, kind: 'eventAttack', base: { ...act, path } });
@@ -1337,6 +1390,8 @@ export function PlayPage({ client, onExit }: { client: GameClientApi; onExit?: (
                     ? 'The Eagles are Coming! — click a highlighted Sauron Stronghold to fly the surviving Nazgûl there.'
                     : isRetreatPick
                     ? `Retreating — click a highlighted region to fall back there. Only regions free of enemy troops and enemy Settlements can be retreated into.`
+                      + (g.view.pendingCombat && retreatActs.some((a) => a.kind === 'preCombatRetreat' && a.region === g.view!.pendingCombat!.to)
+                        ? ` Or click ${regionName(g.view.pendingCombat.to)} itself to withdraw into the Stronghold.` : '')
                     : isPlaceGandalf
                     ? 'Gandalf the White returns — click a highlighted region to place him there.'
                     : placeActs.length > 0
@@ -1360,7 +1415,7 @@ export function PlayPage({ client, onExit }: { client: GameClientApi; onExit?: (
               much room the actions had left (player report 3i2j21042q3v2g36). */}
           <div style={{ display: 'flex', flexShrink: 0, borderBottom: '1px solid #2a2418' }}>
             <div style={{ flex: politicsUp ? '0 0 430px' : '1 1 auto', minWidth: 0 }}>
-              <StatusBar view={g.view} you={g.you} onHoverChar={onHoverChar} onHoverCard={onHoverCard} trailing={statusTrailing} elvenActions={elvenActions} onAction={(a) => void submit(a)} />
+              <StatusBar view={g.view} you={g.you} onHoverChar={onHoverChar} onHoverCard={onHoverCard} trailing={statusTrailing} />
             </div>
             {politicsUp && (
               <div style={{ flex: '1 1 0', minWidth: 0, borderLeft: '1px solid #2a2418', background: '#15110b' }}>
@@ -1418,7 +1473,8 @@ export function PlayPage({ client, onExit }: { client: GameClientApi; onExit?: (
                   <button onClick={() => setDiePick(null)} style={{ marginLeft: 'auto', background: 'none', border: '1px solid #6a531f', color: '#cb8', borderRadius: 4, padding: '1px 6px', cursor: 'pointer', fontSize: 11 }}>cancel</button>
                 </div>
               )}
-                <DiceTray view={g.view} you={g.you as Side} only="mine" selectedDie={activeDie} onSelectDie={g.yourTurn && !g.view.pendingChoice && !inActionDie ? setDie : undefined} inActionDie={inActionDie} />
+                <DiceTray view={g.view} you={g.you as Side} only="mine" selectedDie={activeDie} onSelectDie={g.yourTurn && !g.view.pendingChoice && !inActionDie ? setDie : undefined} inActionDie={inActionDie}
+                  ringActions={elvenActions} onAction={(a) => void submit(a)} />
                 <HandStrip view={g.view} you={g.you as Side} onHoverCard={onHoverCard} playable={playableCards} onPlay={(a) => { if (minionPick) cancelMinionPick(); clearMove(); void submit(a); }} busy={busy} />
               </div>
             </div>
@@ -1451,7 +1507,7 @@ export function PlayPage({ client, onExit }: { client: GameClientApi; onExit?: (
                       Hover a card, a region, or the Guide to inspect it here.
                     </div>
                     <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-                      <LogPanel view={g.view} times={logTimes} recentTurns={settings.sideLog === 'all' ? undefined : 2} />
+                      <LogPanel view={logView!} times={logTimes} recentTurns={settings.sideLog === 'all' ? undefined : 2} />
                     </div>
                   </div>
                 )}
@@ -1482,6 +1538,12 @@ export function PlayPage({ client, onExit }: { client: GameClientApi; onExit?: (
           <div style={{ background: '#1c1710', color: '#eee', fontFamily: 'system-ui', padding: 16, borderRadius: 12, border: '1px solid #5a4a2a', minWidth: 280, boxShadow: '0 8px 40px #000' }}
             onClick={(e) => e.stopPropagation()}>
             <div style={{ fontSize: 12, color: '#e6b85a', fontVariant: 'small-caps', letterSpacing: 1, marginBottom: 8 }}>Muster in {REGIONS[musterMenu]?.name ?? musterMenu}</div>
+            {/* A full region may still be mustered into (p.26 checks the limit after the action). */}
+            {g.view && unitCount(g.view, musterMenu) >= STACKING_LIMIT && (
+              <div style={{ fontSize: 12.5, color: '#f0d090', background: '#3a2a12', border: '1px solid #6a531f', borderRadius: 6, padding: '6px 9px', margin: '0 0 6px', maxWidth: 320 }}>
+                ⚑ This Army already has {unitCount(g.view, musterMenu)} units. A unit mustered here puts it over the limit of 10, and you then send one unit of your choice back to reinforcements (e.g. muster an Elite, send back a Regular).
+              </div>
+            )}
             {[...recruitActs, ...cardRecruitActs, ...secondMusterActs].filter((a) => a.region === musterMenu).map((a, i) => (
               <button key={i} onClick={() => { setMusterMenu(null); void submit(a); }}
                 style={{ display: 'block', width: '100%', textAlign: 'left', margin: '4px 0', padding: '8px 12px', fontSize: 14, background: '#3a3326', color: '#f0e9d8', border: '1px solid #5a4a2a', borderRadius: 6, cursor: 'pointer' }}>
@@ -1489,6 +1551,21 @@ export function PlayPage({ client, onExit }: { client: GameClientApi; onExit?: (
               </button>
             ))}
             <button onClick={() => setMusterMenu(null)} style={{ marginTop: 6, padding: '5px 12px', fontSize: 13, background: 'transparent', color: '#a98', border: '1px solid #553', borderRadius: 6, cursor: 'pointer' }}>Cancel</button>
+          </div>
+        </div>
+      )}
+      {noEffect && g.view && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(8,6,3,0.55)', display: 'grid', placeItems: 'center', zIndex: 60 }}
+          onClick={() => setNoEffect(null)}>
+          <div style={{ background: '#1c1710', color: '#eee', fontFamily: 'system-ui', padding: 16, borderRadius: 12, border: '1px solid #5a4a2a', maxWidth: 340, boxShadow: '0 8px 40px #000' }}
+            onClick={(e) => e.stopPropagation()}>
+            <div style={{ fontSize: 14, marginBottom: 10 }}>⚑ The Fellowship has no Corruption, so {cardName(noEffect.cardId)} will heal nothing. Play it anyway? (It spends the die and the card.)</div>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              <button data-testid="no-effect-play" onClick={() => { const a = noEffect; setNoEffect(null); noEffectOk.current = a; void submit(a); }}
+                style={{ padding: '7px 12px', fontSize: 14, background: '#3a3326', color: '#f0e9d8', border: '1px solid #5a4a2a', borderRadius: 6, cursor: 'pointer' }}>Play it anyway</button>
+              <button onClick={() => setNoEffect(null)}
+                style={{ padding: '7px 12px', fontSize: 14, background: 'transparent', color: '#a98', border: '1px solid #553', borderRadius: 6, cursor: 'pointer' }}>Cancel</button>
+            </div>
           </div>
         </div>
       )}
@@ -1524,6 +1601,7 @@ export function PlayPage({ client, onExit }: { client: GameClientApi; onExit?: (
       {compPick && g.view && g.you && (
         <CompanionPicker from={compPick.from} candidates={compPick.candidates} view={g.view} you={g.you as Side}
           opts={compPick.card ? CARD_COMPANION_MOVE_OPTS[compPick.card] : undefined} separate={compPick.separate}
+          required={compPick.required} fixedDests={compPick.fixed}
           onConfirm={(group) => {
             const { from, card } = compPick; setCompPick(null);
             if (compPick.separate) {
@@ -1533,7 +1611,10 @@ export function PlayPage({ client, onExit }: { client: GameClientApi; onExit?: (
               void submit({ kind: 'separateCompanion', companion: group[0]! });
               return;
             }
-            const pick = group.length === 1 ? { from, char: group[0]! } : { from, char: companionGroupLeader(g.view!, from, group, card ? CARD_COMPANION_MOVE_OPTS[card] : {}), group };
+            // A direct move is the required Companion's (the card names him); others ride along.
+            const lead = compPick.required?.[0];
+            const pick = lead ? { from, char: lead, ...(group.length > 1 ? { group } : {}) }
+              : group.length === 1 ? { from, char: group[0]! } : { from, char: companionGroupLeader(g.view!, from, group, card ? CARD_COMPANION_MOVE_OPTS[card] : {}), group };
             setCharPick(card ? { ...pick, card } : pick);
           }}
           onCancel={() => setCompPick(null)} />
@@ -1637,11 +1718,11 @@ export function PlayPage({ client, onExit }: { client: GameClientApi; onExit?: (
           <div onClick={(e) => e.stopPropagation()} style={{ position: 'relative', width: 520, maxWidth: '92vw' }}>
             <div style={{ background: '#1c1710', color: '#eee', fontFamily: 'system-ui', borderRadius: 12, border: '1px solid #5a4a2a', display: 'flex', flexDirection: 'column', boxShadow: '0 8px 40px #000' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, padding: '6px 10px', borderBottom: '1px solid #2a2418' }}>
-                <CopyLogButton view={g.view} style={{ background: 'none', border: '1px solid #5a4a2a', color: '#cb9', borderRadius: 6, padding: '2px 10px', cursor: 'pointer' }} />
+                <CopyLogButton view={logView!} style={{ background: 'none', border: '1px solid #5a4a2a', color: '#cb9', borderRadius: 6, padding: '2px 10px', cursor: 'pointer' }} />
                 <button onClick={() => { setLogOpen(false); setLogHover(null); }} style={{ background: 'none', border: '1px solid #5a4a2a', color: '#cb9', borderRadius: 6, padding: '2px 10px', cursor: 'pointer' }}>Close</button>
               </div>
               <div style={{ height: '60vh', overflowY: 'auto' }}>
-                <LogPanel view={g.view} times={logTimes} onHoverCard={(id) => setLogHover(id ? { kind: 'card', id } : null)} />
+                <LogPanel view={logView!} times={logTimes} onHoverCard={(id) => setLogHover(id ? { kind: 'card', id } : null)} />
               </div>
             </div>
             {logHover?.kind === 'card' && (
